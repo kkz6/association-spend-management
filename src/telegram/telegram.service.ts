@@ -108,9 +108,13 @@ export class TelegramService implements OnModuleInit {
   }
 
   private async askFollowUpQuestions(chatId: number, extractedInfo: ExtractedInfo) {
+    console.log('Starting follow-up questions with info:', extractedInfo);
     const questions: string[] = [];
     const userState = this.userStates.get(chatId);
-    if (!userState) return;
+    if (!userState) {
+      console.log('No user state found for chatId:', chatId);
+      return;
+    }
 
     if (!extractedInfo.amount) {
       questions.push('What is the amount?');
@@ -125,14 +129,18 @@ export class TelegramService implements OnModuleInit {
       questions.push('What is the date? (YYYY-MM-DD)');
     }
 
+    console.log('Generated questions:', questions);
+
     if (questions.length > 0) {
       this.userStates.set(chatId, {
         type: userState.type,
         extractedInfo,
         pendingQuestions: questions,
       });
+      console.log('Sending first question:', questions[0]);
       await this.bot.sendMessage(chatId, questions[0]);
     } else {
+      console.log('No questions to ask, proceeding to confirmation');
       await this.confirmAndSaveEntry(chatId, extractedInfo);
     }
   }
@@ -214,6 +222,16 @@ export class TelegramService implements OnModuleInit {
         return;
       }
       
+      // Check if user state exists
+      const userState = this.userStates.get(chatId);
+      if (!userState) {
+        await this.bot.sendMessage(
+          chatId,
+          'Please use /expense or /income command first, then upload the receipt image.'
+        );
+        return;
+      }
+      
       const photo = msg.photo[msg.photo.length - 1];
       const fileId = photo.file_id;
       
@@ -235,14 +253,30 @@ export class TelegramService implements OnModuleInit {
           return;
         }
 
+        console.log('Extracted text from image:', text);
+
         // Extract information using Gemini AI
         await this.bot.sendMessage(chatId, 'Analyzing the extracted text... 🤖');
-        const extractedInfo = await this.extractInfoFromText(text);
-        
-        if (extractedInfo.confidence > 0.7) {
-          await this.confirmAndSaveEntry(chatId, extractedInfo);
-        } else {
-          await this.askFollowUpQuestions(chatId, extractedInfo);
+        try {
+          const extractedInfo = await this.extractInfoFromText(text);
+          console.log('Extracted info confidence:', extractedInfo.confidence);
+          
+          // Set the type from user state
+          extractedInfo.type = userState.type;
+          
+          if (extractedInfo.confidence > 0.7) {
+            console.log('High confidence, proceeding to confirmation');
+            await this.confirmAndSaveEntry(chatId, extractedInfo);
+          } else {
+            console.log('Low confidence, starting follow-up questions');
+            await this.askFollowUpQuestions(chatId, extractedInfo);
+          }
+        } catch (error) {
+          console.error('Error in Gemini analysis:', error);
+          await this.bot.sendMessage(
+            chatId,
+            '❌ Error analyzing the text. Please try entering the details manually using the format:\nAmount, Category, Description'
+          );
         }
       } catch (error) {
         console.error('Error processing image:', error);
