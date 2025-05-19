@@ -4,6 +4,7 @@ import * as TelegramBot from 'node-telegram-bot-api';
 import { GoogleSheetsService } from '../google-sheets/google-sheets.service';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createWorker, Worker, createScheduler } from 'tesseract.js';
+import * as Sentry from '@sentry/node';
 
 interface ExtractedInfo {
   amount?: number;
@@ -65,7 +66,6 @@ export class TelegramService implements OnModuleInit {
     Return ONLY the JSON object, no other text or formatting. If any field is unclear, set it to null. Only include fields you're confident about.`;
 
     try {
-      console.log('Sending request to Gemini API with model: gemini-2.0-flash');
       const result = await Promise.race([
         model.generateContent({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -80,39 +80,31 @@ export class TelegramService implements OnModuleInit {
           setTimeout(() => reject(new Error('Request timed out')), 30000)
         )
       ]);
-      console.log('Received response from Gemini API');
       
       const response = await result.response;
-      console.log('Response text:', response.text());
-      
       const text = response.text().trim();
-      // Remove any markdown formatting if present
       const cleanText = text.replace(/```json\n?|\n?```/g, '');
-      console.log('Cleaned text:', cleanText);
-      
       const extractedInfo = JSON.parse(cleanText) as ExtractedInfo;
-      console.log('Parsed info:', extractedInfo);
       
       return extractedInfo;
     } catch (error) {
-      console.error('Error extracting info:', error);
-      if (error instanceof Error) {
-        console.error('Error details:', {
-          name: error.name,
-          message: error.message,
-          stack: error.stack
-        });
-      }
+      Sentry.captureException(error, {
+        extra: {
+          text,
+          prompt,
+        },
+      });
       throw new Error('Failed to extract information from the text. Please try entering the details manually.');
     }
   }
 
   private async askFollowUpQuestions(chatId: number, extractedInfo: ExtractedInfo) {
-    console.log('Starting follow-up questions with info:', extractedInfo);
     const questions: string[] = [];
     const userState = this.userStates.get(chatId);
     if (!userState) {
-      console.log('No user state found for chatId:', chatId);
+      Sentry.captureMessage('No user state found for follow-up questions', {
+        extra: { chatId, extractedInfo },
+      });
       return;
     }
 
@@ -129,25 +121,26 @@ export class TelegramService implements OnModuleInit {
       questions.push('What is the date? (YYYY-MM-DD)');
     }
 
-    console.log('Generated questions:', questions);
-
     if (questions.length > 0) {
       this.userStates.set(chatId, {
         type: userState.type,
         extractedInfo,
         pendingQuestions: questions,
       });
-      console.log('Sending first question:', questions[0]);
       await this.bot.sendMessage(chatId, questions[0]);
     } else {
-      console.log('No questions to ask, proceeding to confirmation');
       await this.confirmAndSaveEntry(chatId, extractedInfo);
     }
   }
 
   private async confirmAndSaveEntry(chatId: number, info: ExtractedInfo) {
     const userState = this.userStates.get(chatId);
-    if (!userState) return;
+    if (!userState) {
+      Sentry.captureMessage('No user state found for confirmation', {
+        extra: { chatId, info },
+      });
+      return;
+    }
 
     const entry = {
       amount: info.amount || 0,
@@ -221,7 +214,7 @@ export class TelegramService implements OnModuleInit {
         await this.bot.sendMessage(chatId, 'No photo received. Please try again.');
         return;
       }
-      
+
       // Check if user state exists
       const userState = this.userStates.get(chatId);
       if (!userState) {
@@ -253,33 +246,38 @@ export class TelegramService implements OnModuleInit {
           return;
         }
 
-        console.log('Extracted text from image:', text);
-
         // Extract information using Gemini AI
         await this.bot.sendMessage(chatId, 'Analyzing the extracted text... 🤖');
         try {
           const extractedInfo = await this.extractInfoFromText(text);
-          console.log('Extracted info confidence:', extractedInfo.confidence);
           
           // Set the type from user state
           extractedInfo.type = userState.type;
           
           if (extractedInfo.confidence > 0.7) {
-            console.log('High confidence, proceeding to confirmation');
             await this.confirmAndSaveEntry(chatId, extractedInfo);
           } else {
-            console.log('Low confidence, starting follow-up questions');
             await this.askFollowUpQuestions(chatId, extractedInfo);
           }
         } catch (error) {
-          console.error('Error in Gemini analysis:', error);
+          Sentry.captureException(error, {
+            extra: {
+              chatId,
+              text,
+            },
+          });
           await this.bot.sendMessage(
             chatId,
             '❌ Error analyzing the text. Please try entering the details manually using the format:\nAmount, Category, Description'
           );
         }
       } catch (error) {
-        console.error('Error processing image:', error);
+        Sentry.captureException(error, {
+          extra: {
+            chatId,
+            fileId,
+          },
+        });
         let errorMessage = '❌ Error processing your receipt. ';
         
         if (error instanceof Error) {
@@ -320,6 +318,12 @@ export class TelegramService implements OnModuleInit {
             await this.bot.sendMessage(chatId, 'Entry added successfully! ✅');
             this.userStates.delete(chatId);
           } catch (error) {
+            Sentry.captureException(error, {
+              extra: {
+                chatId,
+                entry: userState.extractedInfo,
+              },
+            });
             await this.bot.sendMessage(chatId, 'Error adding entry. Please try again.');
           }
           return;
