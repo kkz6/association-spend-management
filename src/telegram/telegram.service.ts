@@ -113,6 +113,18 @@ export class TelegramService implements OnModuleInit {
       throw new Error('TELEGRAM_BOT_TOKEN is not defined');
     }
     this.bot = new TelegramBot(token, { polling: true });
+    
+    // Set up the menu button
+    await this.bot.setMyCommands([
+      { command: 'start', description: 'Start the bot' },
+      { command: 'expense', description: 'Add an expense' },
+      { command: 'income', description: 'Add an income' },
+      { command: 'report', description: 'View monthly report' },
+      { command: 'flats', description: 'Manage flats' },
+      { command: 'maintenance', description: 'Collect maintenance' },
+      { command: 'collection', description: 'Create collection' }
+    ]);
+
     this.setupBotHandlers();
   }
 
@@ -445,6 +457,268 @@ export class TelegramService implements OnModuleInit {
         'Welcome to the Flat Association Expense Bot! 🏢\n\n' +
         'Please select an option:',
         { reply_markup: keyboard }
+      );
+    });
+
+    // Expense command
+    this.bot.onText(/\/expense/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(chatId, msg.from);
+        return;
+      }
+
+      await this.logAccessAttempt(msg.from, true);
+      this.userStates.set(chatId, { 
+        type: 'expense',
+        userName: `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
+      });
+
+      await this.bot.sendMessage(
+        chatId,
+        'Please enter the expense details in the following format:\n' +
+        'Amount, Category, Description\n' +
+        'Example: 1000, Maintenance, Monthly cleaning\n\n' +
+        'Or upload a receipt image.'
+      );
+    });
+
+    // Income command
+    this.bot.onText(/\/income/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(chatId, msg.from);
+        return;
+      }
+
+      await this.logAccessAttempt(msg.from, true);
+      this.userStates.set(chatId, { 
+        type: 'income',
+        userName: `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
+      });
+
+      await this.bot.sendMessage(
+        chatId,
+        'Please enter the income details in the following format:\n' +
+        'Amount, Category, Description\n' +
+        'Example: 5000, Dues, Monthly maintenance\n\n' +
+        'Or upload a receipt image.'
+      );
+    });
+
+    // Report command
+    this.bot.onText(/\/report/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(chatId, msg.from);
+        return;
+      }
+
+      await this.logAccessAttempt(msg.from, true);
+      await this.bot.sendMessage(chatId, '📊 Generating monthly report...');
+      
+      try {
+        const date = new Date();
+        const month = date.toLocaleString('default', { month: 'long' });
+        const year = date.getFullYear();
+        const sheetName = `${month} ${year}`;
+
+        const response = await this.googleSheetsService.getSheetData(sheetName);
+        if (!response || response.length <= 2) {
+          await this.bot.sendMessage(chatId, 'No entries found for this month.');
+          return;
+        }
+
+        let totalExpenses = 0;
+        let totalIncome = 0;
+        const entries: string[] = [];
+
+        for (let i = 2; i < response.length; i++) {
+          const row = response[i];
+          const amountStr = row[4]?.replace(/[₹,]/g, '') || '0';
+          const amount = parseFloat(amountStr);
+          
+          if (row[1]?.toLowerCase() === 'expense') {
+            totalExpenses += amount;
+          } else if (row[1]?.toLowerCase() === 'income') {
+            totalIncome += amount;
+          }
+
+          entries.push(
+            `${row[0]} - ${row[1].toUpperCase()} - ${row[2]}\n` +
+            `${row[3]} - ${row[4]}`
+          );
+        }
+
+        const netBalance = totalIncome - totalExpenses;
+        const balanceEmoji = netBalance >= 0 ? '🟢' : '🔴';
+
+        let message = `📊 Monthly Report - ${month} ${year}\n\n`;
+        message += `Total Income: ₹${totalIncome.toLocaleString('en-IN')}\n`;
+        message += `Total Expenses: ₹${totalExpenses.toLocaleString('en-IN')}\n`;
+        message += `Net Balance: ${balanceEmoji} ₹${netBalance.toLocaleString('en-IN')}\n\n`;
+        message += 'Recent Transactions:\n\n';
+        message += entries.slice(-5).join('\n\n');
+
+        await this.bot.sendMessage(chatId, message);
+      } catch (error) {
+        console.error('Error generating report:', error);
+        await this.bot.sendMessage(chatId, '❌ Error generating report. Please try again.');
+      }
+    });
+
+    // Flats command
+    this.bot.onText(/\/flats/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(chatId, msg.from);
+        return;
+      }
+
+      await this.logAccessAttempt(msg.from, true);
+
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '➕ Add Flat', callback_data: 'add_flat' },
+            { text: '📝 Update Flat', callback_data: 'update_flat' }
+          ],
+          [
+            { text: '👥 View All Flats', callback_data: 'view_flats' },
+            { text: '🔍 Search Flat', callback_data: 'search_flat' }
+          ],
+          [
+            { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
+          ]
+        ]
+      };
+
+      await this.bot.sendMessage(
+        chatId,
+        '🏢 Flat Management\n\n' +
+        'Please select an option:',
+        { reply_markup: keyboard }
+      );
+    });
+
+    // Maintenance command
+    this.bot.onText(/\/maintenance/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(chatId, msg.from);
+        return;
+      }
+
+      await this.logAccessAttempt(msg.from, true);
+
+      try {
+        const currentDate = new Date();
+        const collectionType: CollectionSheet = {
+          type: 'maintenance',
+          month: currentDate.toLocaleString('default', { month: 'long' }),
+          year: currentDate.getFullYear()
+        };
+        
+        await this.googleSheetsService.initializeCollection(collectionType, 0);
+        
+        const flats = await this.googleSheetsService.getAllFlats();
+        const currentQuarter = Math.floor(currentDate.getMonth() / 3) + 1;
+
+        let message = `💰 Maintenance Collection - Q${currentQuarter} ${currentDate.getFullYear()}\n\n`;
+        let totalExpected = 0;
+
+        for (const flat of flats) {
+          totalExpected += flat.maintenanceAmount;
+          message += `Flat ${flat.flatNumber}:\n`;
+          message += `Owner: ${flat.ownerName}\n`;
+          message += `Amount: ₹${flat.maintenanceAmount.toLocaleString('en-IN')}\n`;
+          message += `Phone: ${flat.phoneNumber}\n\n`;
+        }
+
+        message += `\nTotal Expected: ₹${totalExpected.toLocaleString('en-IN')}`;
+
+        const maintenanceKeyboard = {
+          inline_keyboard: [
+            [
+              { text: '📝 Update Payment Status', callback_data: 'update_payment_status' },
+              { text: '📊 Collection Report', callback_data: 'collection_report' }
+            ],
+            [
+              { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
+            ]
+          ]
+        };
+
+        await this.bot.sendMessage(chatId, message, { reply_markup: maintenanceKeyboard });
+      } catch (error) {
+        console.error('Error in maintenance command:', error);
+        await this.bot.sendMessage(chatId, '❌ Error initializing maintenance collection. Please try again.');
+      }
+    });
+
+    // Collection command
+    this.bot.onText(/\/collection/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(chatId, msg.from);
+        return;
+      }
+
+      await this.logAccessAttempt(msg.from, true);
+
+      const collectionKeyboard = {
+        inline_keyboard: [
+          [
+            { text: '💧 Water Bill', callback_data: 'create_water_collection' },
+            { text: '🔧 Maintenance', callback_data: 'create_maintenance_collection' }
+          ],
+          [
+            { text: '📝 Other Collection', callback_data: 'create_other_collection' }
+          ],
+          [
+            { text: '📊 View Existing Collections', callback_data: 'view_collections' }
+          ],
+          [
+            { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
+          ]
+        ]
+      };
+
+      await this.bot.sendMessage(
+        chatId,
+        '📋 Create New Collection\n\n' +
+        'Select the type of collection to create:',
+        { reply_markup: collectionKeyboard }
       );
     });
 
