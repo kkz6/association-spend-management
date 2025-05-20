@@ -11,6 +11,7 @@ interface Entry {
   date: string;
   type: 'expense' | 'income';
   receiptUrl?: string;
+  addedBy?: string;
 }
 
 @Injectable()
@@ -49,7 +50,7 @@ export class GoogleSheetsService {
       // Format amount with INR symbol
       const formattedAmount = `₹${entry.amount.toLocaleString('en-IN')}`;
       
-      // Ensure we have exactly 7 columns matching our header structure
+      // Ensure we have exactly 8 columns matching our header structure
       const values = [
         [
           entry.date,                                    // A: Date
@@ -58,7 +59,8 @@ export class GoogleSheetsService {
           entry.description,                             // D: Description
           formattedAmount,                               // E: Amount
           entry.receiptUrl || '',                        // F: Receipt URL
-          new Date().toISOString(),                      // G: Timestamp
+          entry.addedBy || 'Unknown',                    // G: Added By
+          new Date().toISOString(),                      // H: Timestamp
         ],
       ];
 
@@ -67,7 +69,7 @@ export class GoogleSheetsService {
       // First, get the current data to find the next row
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheet}!A:G`,
+        range: `${sheet}!A:H`,
       });
 
       const currentData = response.data.values || [];
@@ -76,7 +78,7 @@ export class GoogleSheetsService {
       // Update the specific row instead of appending
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheet}!A${nextRow}:G${nextRow}`,
+        range: `${sheet}!A${nextRow}:H${nextRow}`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
           values,
@@ -130,7 +132,7 @@ export class GoogleSheetsService {
       // Always set up headers and totals row, regardless of whether sheet existed
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A1:G2`,
+        range: `${sheetName}!A1:H2`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
           values: [
@@ -141,7 +143,8 @@ export class GoogleSheetsService {
               'Description', // D
               'Amount',    // E
               'Receipt',   // F
-              'Timestamp', // G
+              'Added By',  // G
+              'Timestamp', // H
             ],
             [
               'Totals',
@@ -149,6 +152,7 @@ export class GoogleSheetsService {
               '',
               '',
               '=SUM(E3:E)',
+              '',
               '',
               '',
             ],
@@ -201,7 +205,7 @@ export class GoogleSheetsService {
       // Get all values from the sheet
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A:G`,
+        range: `${sheetName}!A:H`,
       });
 
       const values = response.data.values || [];
@@ -222,7 +226,7 @@ export class GoogleSheetsService {
       // Update totals row
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A2:G2`,
+        range: `${sheetName}!A2:H2`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
           values: [
@@ -232,6 +236,7 @@ export class GoogleSheetsService {
               '',
               '',
               `₹${totalAmount.toLocaleString('en-IN')}`,
+              '',
               '',
               '',
             ],

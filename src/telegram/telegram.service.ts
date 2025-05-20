@@ -21,6 +21,7 @@ interface UserState {
   extractedInfo?: ExtractedInfo;
   pendingQuestions?: string[];
   receiptUrl?: string;
+  userName?: string;
 }
 
 @Injectable()
@@ -130,6 +131,7 @@ export class TelegramService implements OnModuleInit {
         extractedInfo,
         pendingQuestions: questions,
         receiptUrl: userState.receiptUrl,
+        userName: userState.userName,
       });
       await this.bot.sendMessage(chatId, questions[0]);
     } else {
@@ -153,6 +155,7 @@ export class TelegramService implements OnModuleInit {
       date: info.date || new Date().toISOString().split('T')[0],
       type: userState.type,
       receiptUrl: userState.receiptUrl || '',
+      addedBy: userState.userName || 'Unknown',
     };
 
     const confirmationMessage = `Please confirm the following details:\n\n` +
@@ -162,6 +165,7 @@ export class TelegramService implements OnModuleInit {
       `Date: ${entry.date}\n` +
       `Type: ${entry.type}\n` +
       (entry.receiptUrl ? `Receipt: ${entry.receiptUrl}\n` : '') +
+      `Added By: ${entry.addedBy}\n` +
       `\nIs this correct? (yes/no)`;
 
     await this.bot.sendMessage(chatId, confirmationMessage);
@@ -169,6 +173,7 @@ export class TelegramService implements OnModuleInit {
       type: userState.type,
       extractedInfo: { ...info, confidence: info.confidence },
       receiptUrl: userState.receiptUrl,
+      userName: userState.userName,
     });
   }
 
@@ -176,6 +181,15 @@ export class TelegramService implements OnModuleInit {
     // Start command
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+      // Store user's name when they start using the bot
+      this.userStates.set(chatId, { 
+        type: 'expense',
+        userName: `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
+      });
       await this.bot.sendMessage(
         chatId,
         'Welcome to the Flat Association Expense Bot! 🏢\n\n' +
@@ -191,7 +205,15 @@ export class TelegramService implements OnModuleInit {
     // Handle expense entry
     this.bot.onText(/\/expense/, async (msg) => {
       const chatId = msg.chat.id;
-      this.userStates.set(chatId, { type: 'expense' });
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+      const userState = this.userStates.get(chatId) || { type: 'expense' };
+      this.userStates.set(chatId, { 
+        type: 'expense',
+        userName: userState.userName || `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
+      });
       await this.bot.sendMessage(
         chatId,
         'Please enter the expense details in the following format:\n' +
@@ -204,7 +226,15 @@ export class TelegramService implements OnModuleInit {
     // Handle income entry
     this.bot.onText(/\/income/, async (msg) => {
       const chatId = msg.chat.id;
-      this.userStates.set(chatId, { type: 'income' });
+      if (!msg.from) {
+        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+        return;
+      }
+      const userState = this.userStates.get(chatId) || { type: 'income' };
+      this.userStates.set(chatId, { 
+        type: 'income',
+        userName: userState.userName || `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
+      });
       await this.bot.sendMessage(
         chatId,
         'Please enter the income details in the following format:\n' +
@@ -372,6 +402,7 @@ export class TelegramService implements OnModuleInit {
               date: userState.extractedInfo.date || new Date().toISOString().split('T')[0],
               type: userState.type,
               receiptUrl: userState.receiptUrl || '',
+              addedBy: userState.userName || 'Unknown',
             };
             console.log('Saving entry with receipt URL:', entry.receiptUrl);
             await this.googleSheetsService.addEntry(entry);
@@ -422,6 +453,7 @@ export class TelegramService implements OnModuleInit {
             extractedInfo: updatedInfo,
             pendingQuestions: remainingQuestions,
             receiptUrl: userState.receiptUrl,
+            userName: userState.userName,
           });
 
           if (remainingQuestions.length > 0) {
