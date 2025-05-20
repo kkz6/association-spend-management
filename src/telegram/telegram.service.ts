@@ -65,6 +65,46 @@ export class TelegramService implements OnModuleInit {
       throw new Error('GEMINI_API_KEY is not defined');
     }
     this.genAI = new GoogleGenerativeAI(apiKey);
+
+    // Initialize allowed users from environment variable
+    const allowedUserIds = this.configService.get<string>('ALLOWED_TELEGRAM_USER_IDS');
+    if (allowedUserIds) {
+      allowedUserIds.split(',').forEach(id => {
+        const userId = parseInt(id.trim());
+        if (!isNaN(userId)) {
+          this.allowedUsers.add(userId);
+        }
+      });
+    }
+  }
+
+  private async logAccessAttempt(user: TelegramBot.User, isAuthorized: boolean) {
+    // Only log unauthorized access attempts
+    if (!isAuthorized) {
+      const timestamp = new Date().toISOString();
+      const userInfo = {
+        id: user.id,
+        username: user.username || 'No username',
+        firstName: user.first_name,
+        lastName: user.last_name || 'No last name',
+        timestamp
+      };
+
+      // Log to console
+      console.log('Unauthorized Bot Access Attempt:', userInfo);
+    }
+  }
+
+  private isUserAuthorized(userId: number): boolean {
+    return this.allowedUsers.has(userId);
+  }
+
+  private async handleUnauthorizedUser(chatId: number, user: TelegramBot.User) {
+    await this.logAccessAttempt(user, false);
+    await this.bot.sendMessage(
+      chatId,
+      '⛔ You are not authorized to use this bot. Please contact the administrator for access.'
+    );
   }
 
   async onModuleInit() {
@@ -178,17 +218,12 @@ export class TelegramService implements OnModuleInit {
 
   private async handleFlatInfoInput(chatId: number, userState: UserState, text: string) {
     if (!userState.pendingQuestions || userState.pendingQuestions.length === 0) {
-      console.log('No pending questions found');
       return;
     }
 
     const currentQuestion = userState.pendingQuestions[0];
     const answer = text.trim();
     const remainingQuestions = userState.pendingQuestions.slice(1);
-
-    console.log('Current question:', currentQuestion);
-    console.log('Answer:', answer);
-    console.log('Remaining questions:', remainingQuestions);
 
     // Initialize flatInfo first
     let flatInfo: Partial<FlatInfo>;
@@ -200,8 +235,6 @@ export class TelegramService implements OnModuleInit {
 
     // Handle skip command
     if (answer.toLowerCase() === 'skip') {
-      console.log('Skip command detected');
-      
       // For required fields, don't allow skipping
       if (currentQuestion.includes('flat number') || 
           currentQuestion.includes('floor number') || 
@@ -209,15 +242,12 @@ export class TelegramService implements OnModuleInit {
           currentQuestion.includes('maintenance amount') || 
           currentQuestion.includes('phone number') || 
           currentQuestion.includes('occupied')) {
-        console.log('Attempted to skip required field');
         await this.bot.sendMessage(chatId, '❌ This field is required. Please provide a value.');
         return;
       }
 
-      console.log('Skipping optional field');
       // For optional fields, proceed to next question
       if (remainingQuestions.length > 0) {
-        console.log('Moving to next question:', remainingQuestions[0]);
         await this.bot.sendMessage(chatId, remainingQuestions[0]);
         
         // Update state with remaining questions
@@ -228,11 +258,8 @@ export class TelegramService implements OnModuleInit {
           userName: userState.userName
         };
         
-        console.log('Updating state with:', newState);
         this.userStates.set(chatId, newState);
       } else {
-        console.log('No more questions, attempting to save');
-        // If this was the last question, try to save with available information
         try {
           // Ensure all required fields are present
           if (!flatInfo.flatNumber || !flatInfo.floorNumber || !flatInfo.ownerName || 
@@ -282,10 +309,7 @@ export class TelegramService implements OnModuleInit {
       flatInfo.email = answer;
     }
 
-    console.log('Updated flatInfo:', flatInfo);
-
     if (remainingQuestions.length > 0) {
-      console.log('Moving to next question:', remainingQuestions[0]);
       await this.bot.sendMessage(chatId, remainingQuestions[0]);
       
       // Update state with remaining questions
@@ -296,10 +320,8 @@ export class TelegramService implements OnModuleInit {
         userName: userState.userName
       };
       
-      console.log('Updating state with:', newState);
       this.userStates.set(chatId, newState);
     } else {
-      console.log('No more questions, attempting to save');
       try {
         // Ensure all required fields are present
         if (!flatInfo.flatNumber || !flatInfo.floorNumber || !flatInfo.ownerName || 
@@ -382,6 +404,16 @@ export class TelegramService implements OnModuleInit {
         await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
         return;
       }
+
+      // Check if user is authorized
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(chatId, msg.from);
+        return;
+      }
+
+      // Log authorized access
+      await this.logAccessAttempt(msg.from, true);
+
       // Store user's name when they start using the bot
       this.userStates.set(chatId, { 
         type: 'expense',
@@ -418,7 +450,7 @@ export class TelegramService implements OnModuleInit {
 
     // Handle callback queries (button clicks)
     this.bot.on('callback_query', async (callbackQuery) => {
-      if (!callbackQuery.message || !callbackQuery.data) {
+      if (!callbackQuery.message || !callbackQuery.data || !callbackQuery.from) {
         await this.bot.answerCallbackQuery(callbackQuery.id, {
           text: 'Error: Invalid message or data'
         });
@@ -426,14 +458,18 @@ export class TelegramService implements OnModuleInit {
       }
 
       const chatId = callbackQuery.message.chat.id;
-      const data = callbackQuery.data;
 
-      if (!callbackQuery.from) {
-        await this.bot.answerCallbackQuery(callbackQuery.id, {
-          text: 'Error: Could not identify user'
-        });
+      // Check if user is authorized
+      if (!this.isUserAuthorized(callbackQuery.from.id)) {
+        await this.handleUnauthorizedUser(chatId, callbackQuery.from);
+        await this.bot.answerCallbackQuery(callbackQuery.id);
         return;
       }
+
+      // Log authorized access
+      await this.logAccessAttempt(callbackQuery.from, true);
+
+      const data = callbackQuery.data;
 
       // Store user's name if not already stored
       const currentState = this.userStates.get(chatId);
@@ -1019,11 +1055,39 @@ export class TelegramService implements OnModuleInit {
 
     // Handle photo messages
     this.bot.on('photo', async (msg) => {
+      if (!msg.from) {
+        await this.bot.sendMessage(msg.chat.id, 'Error: Could not identify user.');
+        return;
+      }
+
+      // Check if user is authorized
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(msg.chat.id, msg.from);
+        return;
+      }
+
+      // Log authorized access
+      await this.logAccessAttempt(msg.from, true);
+
       await this.handlePhotoMessage(msg);
     });
 
     // Handle text messages
     this.bot.on('message', async (msg) => {
+      if (!msg.from) {
+        await this.bot.sendMessage(msg.chat.id, 'Error: Could not identify user.');
+        return;
+      }
+
+      // Check if user is authorized
+      if (!this.isUserAuthorized(msg.from.id)) {
+        await this.handleUnauthorizedUser(msg.chat.id, msg.from);
+        return;
+      }
+
+      // Log authorized access
+      await this.logAccessAttempt(msg.from, true);
+
       await this.handleTextMessage(msg);
     });
 
@@ -1083,14 +1147,12 @@ export class TelegramService implements OnModuleInit {
       const fileName = `receipt_${Date.now()}.jpg`;
       try {
         driveUrl = await this.googleDriveService.uploadImage(imageUrl, fileName);
-        console.log('Successfully uploaded to Google Drive:', driveUrl);
         
         // Update user state with receipt URL immediately after upload
         this.userStates.set(chatId, {
           ...userState,
           receiptUrl: driveUrl,
         });
-        console.log('Updated user state with receipt URL:', this.userStates.get(chatId));
       } catch (driveError) {
         console.error('Google Drive upload error:', driveError);
         Sentry.captureException(driveError, {
@@ -1112,7 +1174,6 @@ export class TelegramService implements OnModuleInit {
         const { data: { text: ocrText } } = await worker.recognize(imageUrl);
         await worker.terminate();
         text = ocrText;
-        console.log('OCR extracted text:', text);
       } catch (ocrError) {
         console.error('OCR processing error:', ocrError);
         Sentry.captureException(ocrError, {
@@ -1126,7 +1187,6 @@ export class TelegramService implements OnModuleInit {
       }
 
       if (!text || text.trim().length === 0) {
-        console.log('No text extracted from image');
         await this.bot.sendMessage(chatId, '❌ Could not extract any text from the image. Please try again with a clearer image or enter the details manually.');
         return;
       }
@@ -1135,7 +1195,6 @@ export class TelegramService implements OnModuleInit {
       await this.bot.sendMessage(chatId, 'Analyzing the extracted text... 🤖');
       try {
         const extractedInfo = await this.extractInfoFromText(text);
-        console.log('Gemini AI extracted info:', extractedInfo);
         
         // Set the type from user state
         if (userState.type === 'expense' || userState.type === 'income') {
@@ -1144,7 +1203,6 @@ export class TelegramService implements OnModuleInit {
         
         // Get the current user state to ensure we have the receipt URL
         const currentState = this.userStates.get(chatId);
-        console.log('Current user state before confirmation:', currentState);
         
         if (extractedInfo.confidence > 0.7) {
           await this.confirmAndSaveEntry(chatId, extractedInfo);
@@ -1258,7 +1316,6 @@ export class TelegramService implements OnModuleInit {
     // Handle confirmation
     if (text === 'yes' && userState.extractedInfo && this.isExtractedInfo(userState.extractedInfo)) {
       try {
-        console.log('User confirmed entry. Current user state:', userState);
         const entry = {
           amount: userState.extractedInfo.amount || 0,
           category: userState.extractedInfo.category || '',
@@ -1268,7 +1325,6 @@ export class TelegramService implements OnModuleInit {
           receiptUrl: userState.receiptUrl || '',
           addedBy: userState.userName || 'Unknown',
         };
-        console.log('Saving entry with receipt URL:', entry.receiptUrl);
         await this.googleSheetsService.addEntry(entry);
         await this.bot.sendMessage(chatId, 'Entry added successfully! ✅');
         this.userStates.delete(chatId);
