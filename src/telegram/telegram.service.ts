@@ -2,6 +2,7 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { GoogleSheetsService } from '../google-sheets/google-sheets.service';
+import { GoogleDriveService } from '../google-drive/google-drive.service';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createWorker, Worker, createScheduler } from 'tesseract.js';
 import * as Sentry from '@sentry/node';
@@ -19,6 +20,7 @@ interface UserState {
   type: 'expense' | 'income';
   extractedInfo?: ExtractedInfo;
   pendingQuestions?: string[];
+  receiptUrl?: string;
 }
 
 @Injectable()
@@ -32,6 +34,7 @@ export class TelegramService implements OnModuleInit {
   constructor(
     private configService: ConfigService,
     private googleSheetsService: GoogleSheetsService,
+    private googleDriveService: GoogleDriveService,
   ) {
     this.scheduler = createScheduler();
     const apiKey = this.configService.get<string>('GEMINI_API_KEY');
@@ -148,6 +151,7 @@ export class TelegramService implements OnModuleInit {
       description: info.description || '',
       date: info.date || new Date().toISOString().split('T')[0],
       type: userState.type,
+      receiptUrl: userState.receiptUrl || '',
     };
 
     const confirmationMessage = `Please confirm the following details:\n\n` +
@@ -155,13 +159,15 @@ export class TelegramService implements OnModuleInit {
       `Category: ${entry.category}\n` +
       `Description: ${entry.description}\n` +
       `Date: ${entry.date}\n` +
-      `Type: ${entry.type}\n\n` +
-      `Is this correct? (yes/no)`;
+      `Type: ${entry.type}\n` +
+      (entry.receiptUrl ? `Receipt: ${entry.receiptUrl}\n` : '') +
+      `\nIs this correct? (yes/no)`;
 
     await this.bot.sendMessage(chatId, confirmationMessage);
     this.userStates.set(chatId, { 
       type: userState.type,
-      extractedInfo: { ...info, confidence: info.confidence }
+      extractedInfo: { ...info, confidence: info.confidence },
+      receiptUrl: userState.receiptUrl,
     });
   }
 
@@ -227,6 +233,7 @@ export class TelegramService implements OnModuleInit {
       
       const photo = msg.photo[msg.photo.length - 1];
       const fileId = photo.file_id;
+      let driveUrl: string;
       
       try {
         // Send processing message
@@ -235,13 +242,48 @@ export class TelegramService implements OnModuleInit {
         const file = await this.bot.getFile(fileId);
         const imageUrl = `https://api.telegram.org/file/bot${this.configService.get('TELEGRAM_BOT_TOKEN')}/${file.file_path}`;
         
+        // Upload image to Google Drive
+        await this.bot.sendMessage(chatId, 'Uploading receipt to Google Drive... 📤');
+        const fileName = `receipt_${Date.now()}.jpg`;
+        try {
+          driveUrl = await this.googleDriveService.uploadImage(imageUrl, fileName);
+          console.log('Successfully uploaded to Google Drive:', driveUrl);
+        } catch (driveError) {
+          console.error('Google Drive upload error:', driveError);
+          Sentry.captureException(driveError, {
+            extra: {
+              chatId,
+              fileId,
+              imageUrl,
+              fileName,
+            },
+          });
+          throw new Error('Failed to upload image to Google Drive');
+        }
+        
         // Process image with OCR
         await this.bot.sendMessage(chatId, 'Extracting text from image... 🔍');
-        const worker = await createWorker();
-        const { data: { text } } = await worker.recognize(imageUrl);
-        await worker.terminate();
+        let text: string;
+        try {
+          const worker = await createWorker();
+          const { data: { text: ocrText } } = await worker.recognize(imageUrl);
+          await worker.terminate();
+          text = ocrText;
+          console.log('OCR extracted text:', text);
+        } catch (ocrError) {
+          console.error('OCR processing error:', ocrError);
+          Sentry.captureException(ocrError, {
+            extra: {
+              chatId,
+              fileId,
+              imageUrl,
+            },
+          });
+          throw new Error('Failed to process image with OCR');
+        }
 
         if (!text || text.trim().length === 0) {
+          console.log('No text extracted from image');
           await this.bot.sendMessage(chatId, '❌ Could not extract any text from the image. Please try again with a clearer image or enter the details manually.');
           return;
         }
@@ -250,17 +292,25 @@ export class TelegramService implements OnModuleInit {
         await this.bot.sendMessage(chatId, 'Analyzing the extracted text... 🤖');
         try {
           const extractedInfo = await this.extractInfoFromText(text);
+          console.log('Gemini AI extracted info:', extractedInfo);
           
           // Set the type from user state
           extractedInfo.type = userState.type;
+          
+          // Update user state with receipt URL
+          this.userStates.set(chatId, {
+            ...userState,
+            receiptUrl: driveUrl,
+          });
           
           if (extractedInfo.confidence > 0.7) {
             await this.confirmAndSaveEntry(chatId, extractedInfo);
           } else {
             await this.askFollowUpQuestions(chatId, extractedInfo);
           }
-        } catch (error) {
-          Sentry.captureException(error, {
+        } catch (geminiError) {
+          console.error('Gemini AI processing error:', geminiError);
+          Sentry.captureException(geminiError, {
             extra: {
               chatId,
               text,
@@ -272,6 +322,7 @@ export class TelegramService implements OnModuleInit {
           );
         }
       } catch (error) {
+        console.error('Overall error processing receipt:', error);
         Sentry.captureException(error, {
           extra: {
             chatId,
@@ -313,15 +364,19 @@ export class TelegramService implements OnModuleInit {
               description: userState.extractedInfo.description || '',
               date: userState.extractedInfo.date || new Date().toISOString().split('T')[0],
               type: userState.type,
+              receiptUrl: userState.receiptUrl || '',
             };
+            console.log('Saving entry with receipt URL:', entry.receiptUrl);
             await this.googleSheetsService.addEntry(entry);
             await this.bot.sendMessage(chatId, 'Entry added successfully! ✅');
             this.userStates.delete(chatId);
           } catch (error) {
+            console.error('Error saving entry:', error);
             Sentry.captureException(error, {
               extra: {
                 chatId,
                 entry: userState.extractedInfo,
+                receiptUrl: userState.receiptUrl,
               },
             });
             await this.bot.sendMessage(chatId, 'Error adding entry. Please try again.');

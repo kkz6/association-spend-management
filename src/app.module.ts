@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TelegramModule } from './telegram/telegram.module';
 import { GoogleSheetsModule } from './google-sheets/google-sheets.module';
+import { GoogleDriveModule } from './google-drive/google-drive.module';
 import { EnvironmentVariables } from './config/env.validation';
 import configuration from './config/configuration';
 
@@ -18,6 +19,7 @@ import configuration from './config/configuration';
     }),
     TelegramModule,
     GoogleSheetsModule,
+    GoogleDriveModule,
   ],
 })
 export class AppModule {}

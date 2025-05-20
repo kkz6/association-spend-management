@@ -2,14 +2,30 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { google } from 'googleapis';
 import { JWT } from 'google-auth-library';
+import * as Sentry from '@sentry/node';
+
+interface Entry {
+  amount: number;
+  category: string;
+  description: string;
+  date: string;
+  type: 'expense' | 'income';
+  receiptUrl?: string;
+}
 
 @Injectable()
 export class GoogleSheetsService {
   private auth: JWT;
   private sheets: any;
+  private readonly spreadsheetId: string;
 
   constructor(private configService: ConfigService) {
     this.initializeGoogleAuth();
+    const sheetId = this.configService.get<string>('SPREADSHEET_ID');
+    if (!sheetId) {
+      throw new Error('SPREADSHEET_ID is not defined');
+    }
+    this.spreadsheetId = sheetId;
   }
 
   private async initializeGoogleAuth() {
@@ -25,101 +41,221 @@ export class GoogleSheetsService {
     this.sheets = google.sheets({ version: 'v4', auth: this.auth });
   }
 
-  async addEntry(entry: {
-    amount: number;
-    category: string;
-    description: string;
-    date: string;
-    type: 'expense' | 'income';
-  }) {
-    const spreadsheetId = this.configService.get('SPREADSHEET_ID');
-    const currentDate = new Date();
-    const month = currentDate.toLocaleString('default', { month: 'long' });
-    const year = currentDate.getFullYear();
-    const sheetName = `${month} ${year}`;
-
+  async addEntry(entry: Entry): Promise<void> {
     try {
-      // Check if sheet exists, if not create it
-      await this.ensureSheetExists(spreadsheetId, sheetName);
-
-      // Add the entry
+      const sheet = await this.getOrCreateMonthlySheet();
+      console.log('Adding entry to sheet:', { entry, sheet });
+      
+      // Ensure we have exactly 7 columns matching our header structure
       const values = [
         [
-          entry.date,
-          entry.type,
-          entry.category,
-          entry.description,
-          entry.amount,
+          entry.date,                                    // A: Date
+          entry.type === 'expense' ? entry.amount : '',  // B: Expense
+          entry.type === 'income' ? entry.amount : '',   // C: Income
+          entry.category,                                // D: Category
+          entry.description,                             // E: Description
+          entry.receiptUrl || '',                        // F: Receipt URL
+          new Date().toISOString(),                      // G: Timestamp
         ],
       ];
 
-      await this.sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: `${sheetName}!A:E`,
-        valueInputOption: 'USER_ENTERED',
-        resource: { values },
+      console.log('Values to be added:', values);
+
+      // First, get the current data to find the next row
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheet}!A:G`,
       });
 
-      // Update totals after adding entry
-      await this.updateTotals(spreadsheetId, sheetName);
+      const currentData = response.data.values || [];
+      const nextRow = currentData.length + 1;
 
-      // Check if we need to create a quarterly report
-      await this.checkAndCreateQuarterlyReport(currentDate);
+      // Update the specific row instead of appending
+      await this.sheets.spreadsheets.values.update({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheet}!A${nextRow}:G${nextRow}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values,
+        },
+      });
+
+      await this.updateTotals(sheet);
     } catch (error) {
       console.error('Error adding entry:', error);
-      throw error;
+      Sentry.captureException(error, {
+        extra: { entry },
+      });
+      throw new Error('Failed to add entry to Google Sheets');
     }
   }
 
-  private async ensureSheetExists(spreadsheetId: string, sheetName: string) {
+  private async getOrCreateMonthlySheet(): Promise<string> {
     try {
-      await this.sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: `${sheetName}!A1`,
+      const date = new Date();
+      const month = date.toLocaleString('default', { month: 'long' });
+      const year = date.getFullYear();
+      const sheetName = `${month} ${year}`;
+
+      // Check if sheet exists
+      const response = await this.sheets.spreadsheets.get({
+        spreadsheetId: this.spreadsheetId,
       });
-    } catch (error) {
-      // Sheet doesn't exist, create it
-      await this.sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        resource: {
-          requests: [
-            {
-              addSheet: {
-                properties: {
-                  title: sheetName,
+
+      const sheetExists = response.data.sheets?.some(
+        (sheet) => sheet.properties?.title === sheetName,
+      );
+
+      if (!sheetExists) {
+        // Create new sheet
+        await this.sheets.spreadsheets.batchUpdate({
+          spreadsheetId: this.spreadsheetId,
+          requestBody: {
+            requests: [
+              {
+                addSheet: {
+                  properties: {
+                    title: sheetName,
+                  },
                 },
               },
-            },
+            ],
+          },
+        });
+
+        // Set up headers and totals row
+        await this.sheets.spreadsheets.values.update({
+          spreadsheetId: this.spreadsheetId,
+          range: `${sheetName}!A1:G2`,
+          valueInputOption: 'USER_ENTERED',
+          requestBody: {
+            values: [
+              [
+                'Date',      // A
+                'Expense',   // B
+                'Income',    // C
+                'Category',  // D
+                'Description', // E
+                'Receipt',   // F
+                'Timestamp', // G
+              ],
+              [
+                'Totals',
+                '=SUM(B3:B)',
+                '=SUM(C3:C)',
+                '',
+                '=B2-C2',
+                '',
+                '',
+              ],
+            ],
+          },
+        });
+
+        // Format headers and totals row
+        const sheetId = await this.getSheetId(response.data.sheets || [], sheetName);
+        await this.sheets.spreadsheets.batchUpdate({
+          spreadsheetId: this.spreadsheetId,
+          requestBody: {
+            requests: [
+              {
+                repeatCell: {
+                  range: {
+                    sheetId,
+                    startRowIndex: 0,
+                    endRowIndex: 2,
+                  },
+                  cell: {
+                    userEnteredFormat: {
+                      backgroundColor: {
+                        red: 0.8,
+                        green: 0.8,
+                        blue: 0.8,
+                      },
+                      textFormat: {
+                        bold: true,
+                      },
+                    },
+                  },
+                  fields: 'userEnteredFormat(backgroundColor,textFormat)',
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      return sheetName;
+    } catch (error) {
+      console.error('Error getting or creating monthly sheet:', error);
+      Sentry.captureException(error);
+      throw new Error('Failed to get or create monthly sheet');
+    }
+  }
+
+  private async updateTotals(sheetName: string) {
+    try {
+      // Get all values from the sheet
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheetName}!A:G`,
+      });
+
+      const values = response.data.values || [];
+      if (values.length <= 2) return; // Only headers and totals row
+
+      // Calculate totals
+      let totalExpense = 0;
+      let totalIncome = 0;
+
+      // Start from index 2 to skip headers and totals row
+      for (let i = 2; i < values.length; i++) {
+        const row = values[i];
+        const expense = parseFloat(row[1]) || 0;
+        const income = parseFloat(row[2]) || 0;
+
+        totalExpense += expense;
+        totalIncome += income;
+      }
+
+      // Update totals row
+      await this.sheets.spreadsheets.values.update({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheetName}!A2:G2`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [
+            [
+              'Totals',
+              totalExpense,
+              totalIncome,
+              '',
+              `Balance: ${totalIncome - totalExpense}`,
+              '',
+              '',
+            ],
           ],
         },
       });
 
-      // Add headers and totals row
-      await this.sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `${sheetName}!A1:F2`,
-        valueInputOption: 'USER_ENTERED',
-        resource: {
-          values: [
-            ['Date', 'Type', 'Category', 'Description', 'Amount', 'Running Total'],
-            ['', '', '', '', '', '=SUM(E3:E)']
-          ],
-        },
+      // Get sheet ID for formatting
+      const sheetResponse = await this.sheets.spreadsheets.get({
+        spreadsheetId: this.spreadsheetId,
       });
+
+      const sheetId = await this.getSheetId(sheetResponse.data.sheets || [], sheetName);
 
       // Format the totals row
       await this.sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        resource: {
+        spreadsheetId: this.spreadsheetId,
+        requestBody: {
           requests: [
             {
               repeatCell: {
                 range: {
-                  sheetId: await this.getSheetId(spreadsheetId, sheetName),
+                  sheetId,
                   startRowIndex: 1,
                   endRowIndex: 2,
-                  startColumnIndex: 0,
-                  endColumnIndex: 6,
                 },
                 cell: {
                   userEnteredFormat: {
@@ -139,100 +275,19 @@ export class GoogleSheetsService {
           ],
         },
       });
-    }
-  }
-
-  private async updateTotals(spreadsheetId: string, sheetName: string) {
-    try {
-      // Get all values from the sheet
-      const response = await this.sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: `${sheetName}!A:E`,
-      });
-
-      const values = response.data.values || [];
-      if (values.length <= 2) return; // Only headers and totals row
-
-      // Calculate totals
-      let totalExpense = 0;
-      let totalIncome = 0;
-      let runningTotal = 0;
-
-      // Start from index 2 to skip headers and totals row
-      for (let i = 2; i < values.length; i++) {
-        const row = values[i];
-        const amount = parseFloat(row[4]) || 0;
-        const type = row[1];
-
-        if (type === 'expense') {
-          totalExpense += amount;
-          runningTotal -= amount;
-        } else if (type === 'income') {
-          totalIncome += amount;
-          runningTotal += amount;
-        }
-      }
-
-      // Update totals row
-      await this.sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `${sheetName}!A2:F2`,
-        valueInputOption: 'USER_ENTERED',
-        resource: {
-          values: [
-            [
-              'Totals',
-              '',
-              '',
-              '',
-              `Income: ${totalIncome}\nExpense: ${totalExpense}\nBalance: ${runningTotal}`,
-              `=SUM(E3:E)`
-            ],
-          ],
-        },
-      });
-
-      // Add running total to each row
-      const runningTotals: number[][] = [];
-      let currentTotal = 0;
-
-      for (let i = 2; i < values.length; i++) {
-        const row = values[i];
-        const amount = parseFloat(row[4]) || 0;
-        const type = row[1];
-
-        if (type === 'expense') {
-          currentTotal -= amount;
-        } else if (type === 'income') {
-          currentTotal += amount;
-        }
-
-        runningTotals.push([currentTotal]);
-      }
-
-      // Update running totals
-      if (runningTotals.length > 0) {
-        await this.sheets.spreadsheets.values.update({
-          spreadsheetId,
-          range: `${sheetName}!F3:F${values.length}`,
-          valueInputOption: 'USER_ENTERED',
-          resource: {
-            values: runningTotals,
-          },
-        });
-      }
     } catch (error) {
       console.error('Error updating totals:', error);
+      Sentry.captureException(error);
     }
   }
 
-  private async getSheetId(spreadsheetId: string, sheetName: string): Promise<number> {
-    const response = await this.sheets.spreadsheets.get({
-      spreadsheetId,
-    });
-    const sheet = response.data.sheets.find(
-      (s: any) => s.properties.title === sheetName
+  private async getSheetId(sheets: any[], sheetName: string): Promise<number> {
+    const sheet = sheets.find(
+      (s: any) => s.properties?.title === sheetName
     );
+    if (!sheet?.properties?.sheetId) {
+      throw new Error(`Could not find sheet ID for sheet: ${sheetName}`);
+    }
     return sheet.properties.sheetId;
   }
 
@@ -245,7 +300,7 @@ export class GoogleSheetsService {
     if (month === quarterEndMonth - 1) {
       // Create quarterly report
       const quarterName = `Q${quarter} ${year}`;
-      const spreadsheetId = this.configService.get('SPREADSHEET_ID');
+      const spreadsheetId = this.spreadsheetId;
 
       // Create new spreadsheet for quarterly report
       const newSpreadsheet = await this.sheets.spreadsheets.create({
@@ -285,7 +340,7 @@ export class GoogleSheetsService {
       }
 
       // Add quarterly totals
-      await this.updateTotals(newSpreadsheet.data.spreadsheetId, 'Sheet1');
+      await this.updateTotals(newSpreadsheet.data.spreadsheetId);
     }
   }
 
