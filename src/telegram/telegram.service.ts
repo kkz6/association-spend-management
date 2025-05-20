@@ -608,38 +608,45 @@ export class TelegramService implements OnModuleInit {
           break;
 
         case 'collect_maintenance':
-          const flats = await this.googleSheetsService.getAllFlats();
-          const currentDate = new Date();
-          const currentQuarter = Math.floor(currentDate.getMonth() / 3) + 1;
-          const currentYear = currentDate.getFullYear();
+          try {
+            // Initialize maintenance collection sheet first
+            await this.googleSheetsService.initializeMaintenanceCollection();
+            
+            const flats = await this.googleSheetsService.getAllFlats();
+            const currentDate = new Date();
+            const currentQuarter = Math.floor(currentDate.getMonth() / 3) + 1;
+            const currentYear = currentDate.getFullYear();
 
-          let message = `💰 Maintenance Collection - Q${currentQuarter} ${currentYear}\n\n`;
-          let totalExpected = 0;
+            let message = `💰 Maintenance Collection - Q${currentQuarter} ${currentYear}\n\n`;
+            let totalExpected = 0;
 
-          for (const flat of flats) {
-            const totalAmount = flat.maintenanceAmount + (flat.parkingCharges || 0);
-            totalExpected += totalAmount;
-            message += `Flat ${flat.flatNumber}:\n`;
-            message += `Owner: ${flat.ownerName}\n`;
-            message += `Amount: ₹${totalAmount.toLocaleString('en-IN')}\n`;
-            message += `Phone: ${flat.phoneNumber}\n\n`;
-          }
+            for (const flat of flats) {
+              totalExpected += flat.maintenanceAmount;
+              message += `Flat ${flat.flatNumber}:\n`;
+              message += `Owner: ${flat.ownerName}\n`;
+              message += `Amount: ₹${flat.maintenanceAmount.toLocaleString('en-IN')}\n`;
+              message += `Phone: ${flat.phoneNumber}\n\n`;
+            }
 
-          message += `\nTotal Expected: ₹${totalExpected.toLocaleString('en-IN')}`;
+            message += `\nTotal Expected: ₹${totalExpected.toLocaleString('en-IN')}`;
 
-          const maintenanceKeyboard = {
-            inline_keyboard: [
-              [
-                { text: '✅ Mark as Collected', callback_data: 'mark_collected' },
-                { text: '📊 Collection Report', callback_data: 'collection_report' }
-              ],
-              [
-                { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
+            const maintenanceKeyboard = {
+              inline_keyboard: [
+                [
+                  { text: '📝 Update Payment Status', callback_data: 'update_payment_status' },
+                  { text: '📊 Collection Report', callback_data: 'collection_report' }
+                ],
+                [
+                  { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
+                ]
               ]
-            ]
-          };
+            };
 
-          await this.bot.sendMessage(chatId, message, { reply_markup: maintenanceKeyboard });
+            await this.bot.sendMessage(chatId, message, { reply_markup: maintenanceKeyboard });
+          } catch (error) {
+            console.error('Error in collect_maintenance:', error);
+            await this.bot.sendMessage(chatId, '❌ Error initializing maintenance collection. Please try again.');
+          }
           break;
 
         case 'main_menu':
@@ -667,6 +674,14 @@ export class TelegramService implements OnModuleInit {
             { reply_markup: mainKeyboard }
           );
           break;
+
+        case 'maintenance_collection':
+          await this.handleMaintenanceCollection(chatId);
+          break;
+
+        case 'update_payment_status':
+          await this.handleUpdatePaymentStatus(chatId);
+          break;
       }
 
       // Answer the callback query to remove the loading state
@@ -681,6 +696,19 @@ export class TelegramService implements OnModuleInit {
     // Handle text messages
     this.bot.on('message', async (msg) => {
       await this.handleTextMessage(msg);
+    });
+
+    // Add handler for flat payment updates
+    this.bot.on('callback_query', async (callbackQuery) => {
+      if (!callbackQuery.data || !callbackQuery.message || !callbackQuery.from) {
+        return;
+      }
+      const data = callbackQuery.data;
+      if (data.startsWith('update_flat_')) {
+        const flatNumber = data.replace('update_flat_', '');
+        const username = `${callbackQuery.from.first_name}${callbackQuery.from.last_name ? ' ' + callbackQuery.from.last_name : ''}`;
+        await this.handleFlatPaymentUpdate(callbackQuery.message.chat.id, flatNumber, username);
+      }
     });
   }
 
@@ -974,6 +1002,126 @@ export class TelegramService implements OnModuleInit {
       };
       
       await this.confirmAndSaveEntry(chatId, entry);
+    }
+  }
+
+  private async handleMaintenanceCollection(chatId: number) {
+    try {
+      // Initialize maintenance collection if not already done
+      await this.googleSheetsService.initializeMaintenanceCollection();
+      
+      // Get current maintenance collection
+      const collection = await this.googleSheetsService.getMaintenanceCollection();
+      
+      if (collection.length === 0) {
+        await this.bot.sendMessage(chatId, 'No maintenance collection data available.');
+        return;
+      }
+
+      // Calculate totals
+      const totalAmount = collection.reduce((sum, item) => sum + item.amount, 0);
+      const paidAmount = collection
+        .filter(item => item.status === 'Paid')
+        .reduce((sum, item) => sum + item.amount, 0);
+      const pendingAmount = totalAmount - paidAmount;
+
+      // Create message with collection details
+      let message = '📊 *Maintenance Collection Status*\n\n';
+      message += `Total Amount: ₹${totalAmount.toLocaleString('en-IN')}\n`;
+      message += `Paid Amount: ₹${paidAmount.toLocaleString('en-IN')}\n`;
+      message += `Pending Amount: ₹${pendingAmount.toLocaleString('en-IN')}\n\n`;
+      message += '*Flat-wise Status:*\n\n';
+
+      collection.forEach(item => {
+        message += `*Flat ${item.flatNumber}* (${item.ownerName})\n`;
+        message += `Amount: ₹${item.amount.toLocaleString('en-IN')}\n`;
+        message += `Status: ${item.status === 'Paid' ? '✅ Paid' : '⏳ Pending'}\n`;
+        if (item.status === 'Paid' && item.paymentDate) {
+          message += `Payment Date: ${item.paymentDate}\n`;
+        }
+        message += '\n';
+      });
+
+      // Create inline keyboard for updating payment status
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: '📝 Update Payment Status', callback_data: 'update_payment_status' }],
+          [{ text: '🔙 Back to Main Menu', callback_data: 'main_menu' }]
+        ]
+      };
+
+      await this.bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    } catch (error) {
+      console.error('Error handling maintenance collection:', error);
+      await this.bot.sendMessage(chatId, 'An error occurred while fetching maintenance collection data.');
+    }
+  }
+
+  private async handleUpdatePaymentStatus(chatId: number) {
+    try {
+      const collection = await this.googleSheetsService.getMaintenanceCollection();
+      
+      if (collection.length === 0) {
+        await this.bot.sendMessage(chatId, 'No maintenance collection data available.');
+        return;
+      }
+
+      // Create keyboard with flat options
+      const keyboard = {
+        inline_keyboard: collection.map(item => [{
+          text: `Flat ${item.flatNumber} (${item.status === 'Paid' ? '✅' : '⏳'})`,
+          callback_data: `update_flat_${item.flatNumber}`
+        }])
+      };
+
+      // Add back button
+      keyboard.inline_keyboard.push([{ text: '🔙 Back', callback_data: 'maintenance_collection' }]);
+
+      await this.bot.sendMessage(
+        chatId,
+        'Select a flat to update its payment status:',
+        { reply_markup: keyboard }
+      );
+    } catch (error) {
+      console.error('Error handling update payment status:', error);
+      await this.bot.sendMessage(chatId, 'An error occurred while fetching flat data.');
+    }
+  }
+
+  private async handleFlatPaymentUpdate(chatId: number, flatNumber: string, username: string) {
+    try {
+      const collection = await this.googleSheetsService.getMaintenanceCollection();
+      const flat = collection.find(item => item.flatNumber === flatNumber);
+
+      if (!flat) {
+        await this.bot.sendMessage(chatId, 'Flat not found in maintenance collection.');
+        return;
+      }
+
+      const newStatus = flat.status === 'Paid' ? 'Pending' : 'Paid';
+      await this.googleSheetsService.updateMaintenanceStatus(flatNumber, newStatus, username);
+
+      // Show updated status
+      const message = `Payment status updated for Flat ${flatNumber}:\n\n` +
+        `Owner: ${flat.ownerName}\n` +
+        `Amount: ₹${flat.amount.toLocaleString('en-IN')}\n` +
+        `New Status: ${newStatus === 'Paid' ? '✅ Paid' : '⏳ Pending'}\n` +
+        (newStatus === 'Paid' ? `Payment Date: ${new Date().toISOString().split('T')[0]}\n` : '');
+
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: '🔄 Update Another Flat', callback_data: 'update_payment_status' }],
+          [{ text: '🔙 Back to Collection', callback_data: 'maintenance_collection' }]
+        ]
+      };
+
+      await this.bot.sendMessage(chatId, message, { reply_markup: keyboard });
+    } catch (error) {
+      console.error('Error handling flat payment update:', error);
+      await this.bot.sendMessage(chatId, 'An error occurred while updating payment status.');
     }
   }
 } 
