@@ -267,8 +267,71 @@ export class TelegramService implements OnModuleInit {
           break;
 
         case 'monthly_report':
-          await this.bot.sendMessage(chatId, '📊 Generating monthly report...');
-          // TODO: Implement monthly report
+          try {
+            await this.bot.sendMessage(chatId, '📊 Generating monthly report...');
+            
+            // Get current month's data
+            const date = new Date();
+            const month = date.toLocaleString('default', { month: 'long' });
+            const year = date.getFullYear();
+            const sheetName = `${month} ${year}`;
+
+            // Get data from Google Sheets
+            const response = await this.googleSheetsService.getSheetData(sheetName);
+            if (!response || response.length <= 2) { // Only headers and totals
+              await this.bot.sendMessage(chatId, 'No entries found for this month.');
+              return;
+            }
+
+            // Calculate totals
+            let totalExpenses = 0;
+            let totalIncome = 0;
+            const entries: string[] = [];
+
+            // Start from index 2 to skip headers and totals row
+            for (let i = 2; i < response.length; i++) {
+              const row = response[i];
+              const amountStr = row[4]?.replace(/[₹,]/g, '') || '0';
+              const amount = parseFloat(amountStr);
+              
+              if (row[1]?.toLowerCase() === 'expense') {
+                totalExpenses += amount;
+              } else if (row[1]?.toLowerCase() === 'income') {
+                totalIncome += amount;
+              }
+
+              // Format entry for report
+              entries.push(
+                `${row[0]} - ${row[1].toUpperCase()} - ${row[2]}\n` +
+                `${row[3]} - ${row[4]}`
+              );
+            }
+
+            const netBalance = totalIncome - totalExpenses;
+            const balanceEmoji = netBalance >= 0 ? '🟢' : '🔴';
+
+            // Create report message
+            const report = [
+              `📊 Monthly Report - ${month} ${year}`,
+              '━━━━━━━━━━━━━━━━━━━━',
+              '',
+              `💰 Total Income: ₹${totalIncome.toLocaleString('en-IN')}`,
+              `💸 Total Expenses: ₹${totalExpenses.toLocaleString('en-IN')}`,
+              `${balanceEmoji} Net Balance: ${netBalance >= 0 ? '+' : ''}₹${netBalance.toLocaleString('en-IN')}`,
+              '',
+              '📝 Recent Entries:',
+              '━━━━━━━━━━━━━━━━━━━━',
+              ...entries.slice(-5), // Show last 5 entries
+              '',
+              'View full report in Google Sheets'
+            ].join('\n');
+
+            await this.bot.sendMessage(chatId, report);
+          } catch (error) {
+            console.error('Error generating monthly report:', error);
+            Sentry.captureException(error);
+            await this.bot.sendMessage(chatId, '❌ Error generating monthly report. Please try again later.');
+          }
           break;
 
         case 'quarterly_report':

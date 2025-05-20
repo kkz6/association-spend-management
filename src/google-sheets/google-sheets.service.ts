@@ -363,4 +363,19 @@ export class GoogleSheetsService {
   private getMonthName(month: number): string {
     return new Date(2000, month, 1).toLocaleString('default', { month: 'long' });
   }
+
+  async getSheetData(sheetName: string): Promise<any[][]> {
+    try {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheetName}!A:H`,
+      });
+
+      return response.data.values || [];
+    } catch (error) {
+      console.error('Error getting sheet data:', error);
+      Sentry.captureException(error);
+      throw new Error('Failed to get sheet data');
+    }
+  }
 } 
