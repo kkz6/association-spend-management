@@ -45,5 +45,8 @@ USER appuser
 ENV PORT=3000
 EXPOSE $PORT
 
+# Add OpenSSL legacy provider for Node.js
+ENV NODE_OPTIONS=--openssl-legacy-provider
+
 # Start the application
 CMD ["npm", "run", "start:prod"] 
