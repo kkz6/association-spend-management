@@ -550,6 +550,46 @@ export class TelegramService implements OnModuleInit {
           );
           break;
 
+        case 'view_flats':
+          try {
+            const flats = await this.googleSheetsService.getAllFlats();
+            if (!flats || flats.length === 0) {
+              await this.bot.sendMessage(chatId, 'No flats found in the database.');
+              return;
+            }
+
+            let message = '🏢 All Flats Information:\n\n';
+            for (const flat of flats) {
+              message += `Flat ${flat.flatNumber}:\n`;
+              message += `Floor: ${flat.floorNumber}\n`;
+              message += `Owner: ${flat.ownerName}\n`;
+              if (flat.tenantName) {
+                message += `Tenant: ${flat.tenantName}\n`;
+              }
+              message += `Maintenance: ₹${flat.maintenanceAmount.toLocaleString('en-IN')}\n`;
+              message += `Phone: ${flat.phoneNumber}\n`;
+              if (flat.email) {
+                message += `Email: ${flat.email}\n`;
+              }
+              message += `Status: ${flat.isOccupied ? 'Occupied' : 'Vacant'}\n`;
+              message += `Last Updated: ${new Date(flat.lastUpdated).toLocaleString()}\n\n`;
+            }
+
+            const backKeyboard = {
+              inline_keyboard: [
+                [
+                  { text: '🔙 Back to Flat Management', callback_data: 'manage_flats' }
+                ]
+              ]
+            };
+
+            await this.bot.sendMessage(chatId, message, { reply_markup: backKeyboard });
+          } catch (error) {
+            console.error('Error viewing flats:', error);
+            await this.bot.sendMessage(chatId, '❌ Error retrieving flat information. Please try again.');
+          }
+          break;
+
         case 'add_flat':
           this.userStates.set(chatId, {
             type: 'flat_info',
@@ -560,8 +600,8 @@ export class TelegramService implements OnModuleInit {
               'Enter maintenance amount:',
               'Enter phone number:',
               'Is the flat occupied? (yes/no):',
-              'If occupied, enter tenant name (or press /skip):',
-              'Enter email (or press /skip):'
+              'If occupied, enter tenant name (or press skip):',
+              'Enter email (or press skip):'
             ]
           });
           await this.bot.sendMessage(chatId, 'Enter flat number:');

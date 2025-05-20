@@ -545,7 +545,7 @@ export class GoogleSheetsService {
       const sheetName = 'Flat Information';
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A:J`,
+        range: `${sheetName}!A:I`,  // Changed from A:J to A:I to match our columns
       });
 
       const data = response.data.values || [];
@@ -556,11 +556,10 @@ export class GoogleSheetsService {
         ownerName: row[2],
         tenantName: row[3] || undefined,
         maintenanceAmount: parseFloat(row[4]),
-        parkingCharges: row[5] ? parseFloat(row[5]) : undefined,
-        phoneNumber: row[6],
-        email: row[7] || undefined,
-        isOccupied: row[8] === 'Yes',
-        lastUpdated: row[9]
+        phoneNumber: row[5],
+        email: row[6] || undefined,
+        isOccupied: row[7] === 'Yes',
+        lastUpdated: row[8]
       }));
     } catch (error) {
       console.error('Error getting all flats:', error);
