@@ -28,7 +28,7 @@ interface FlatInfo {
   lastUpdated: string;
 }
 
-type UserStateType = 'expense' | 'income' | 'flat_info';
+type UserStateType = 'expense' | 'income' | 'flat_info' | 'collection_info';
 
 interface UserState {
   type: UserStateType;
@@ -36,6 +36,14 @@ interface UserState {
   pendingQuestions?: string[];
   receiptUrl?: string;
   userName?: string;
+  collectionType?: CollectionSheet;
+}
+
+interface CollectionSheet {
+  type: 'maintenance' | 'water' | 'other';
+  month: string;
+  year: number;
+  description?: string;
 }
 
 @Injectable()
@@ -162,7 +170,10 @@ export class TelegramService implements OnModuleInit {
   }
 
   private getEntryType(type: UserStateType): 'expense' | 'income' {
-    return type === 'flat_info' ? 'expense' : type;
+    if (type === 'flat_info' || type === 'collection_info') {
+      return 'expense';
+    }
+    return type;
   }
 
   private async handleFlatInfoInput(chatId: number, userState: UserState, text: string) {
@@ -386,6 +397,13 @@ export class TelegramService implements OnModuleInit {
           [
             { text: '📊 Monthly Report', callback_data: 'monthly_report' },
             { text: '📈 Quarterly Report', callback_data: 'quarterly_report' }
+          ],
+          [
+            { text: '🏢 Manage Flats', callback_data: 'manage_flats' },
+            { text: '💰 Collect Maintenance', callback_data: 'collect_maintenance' }
+          ],
+          [
+            { text: '📋 Create Collection', callback_data: 'create_collection' }
           ]
         ]
       };
@@ -400,9 +418,9 @@ export class TelegramService implements OnModuleInit {
 
     // Handle callback queries (button clicks)
     this.bot.on('callback_query', async (callbackQuery) => {
-      if (!callbackQuery.message) {
+      if (!callbackQuery.message || !callbackQuery.data) {
         await this.bot.answerCallbackQuery(callbackQuery.id, {
-          text: 'Error: Invalid message'
+          text: 'Error: Invalid message or data'
         });
         return;
       }
@@ -427,214 +445,223 @@ export class TelegramService implements OnModuleInit {
         receiptUrl: currentState?.receiptUrl
       };
 
-      switch (data) {
-        case 'add_expense':
-          userState.type = 'expense';
-          this.userStates.set(chatId, userState);
-          await this.bot.sendMessage(
-            chatId,
-            'Please enter the expense details in the following format:\n' +
-            'Amount, Category, Description\n' +
-            'Example: 1000, Maintenance, Monthly cleaning\n\n' +
-            'Or upload a receipt image.'
-          );
-          break;
-
-        case 'add_income':
-          userState.type = 'income';
-          this.userStates.set(chatId, userState);
-          await this.bot.sendMessage(
-            chatId,
-            'Please enter the income details in the following format:\n' +
-            'Amount, Category, Description\n' +
-            'Example: 5000, Dues, Monthly maintenance\n\n' +
-            'Or upload a receipt image.'
-          );
-          break;
-
-        case 'monthly_report':
-          try {
-            await this.bot.sendMessage(chatId, '📊 Generating monthly report...');
-            
-            // Get current month's data
-            const date = new Date();
-            const month = date.toLocaleString('default', { month: 'long' });
-            const year = date.getFullYear();
-            const sheetName = `${month} ${year}`;
-
-            // Get data from Google Sheets
-            const response = await this.googleSheetsService.getSheetData(sheetName);
-            if (!response || response.length <= 2) { // Only headers and totals
-              await this.bot.sendMessage(chatId, 'No entries found for this month.');
-              return;
-            }
-
-            // Calculate totals
-            let totalExpenses = 0;
-            let totalIncome = 0;
-            const entries: string[] = [];
-
-            // Start from index 2 to skip headers and totals row
-            for (let i = 2; i < response.length; i++) {
-              const row = response[i];
-              const amountStr = row[4]?.replace(/[₹,]/g, '') || '0';
-              const amount = parseFloat(amountStr);
-              
-              if (row[1]?.toLowerCase() === 'expense') {
-                totalExpenses += amount;
-              } else if (row[1]?.toLowerCase() === 'income') {
-                totalIncome += amount;
-              }
-
-              // Format entry for report
-              entries.push(
-                `${row[0]} - ${row[1].toUpperCase()} - ${row[2]}\n` +
-                `${row[3]} - ${row[4]}`
-              );
-            }
-
-            const netBalance = totalIncome - totalExpenses;
-            const balanceEmoji = netBalance >= 0 ? '🟢' : '🔴';
-
-            // Create report message
-            const report = [
-              `📊 Monthly Report - ${month} ${year}`,
-              '━━━━━━━━━━━━━━━━━━━━',
-              '',
-              `💰 Total Income: ₹${totalIncome.toLocaleString('en-IN')}`,
-              `💸 Total Expenses: ₹${totalExpenses.toLocaleString('en-IN')}`,
-              `${balanceEmoji} Net Balance: ${netBalance >= 0 ? '+' : ''}₹${netBalance.toLocaleString('en-IN')}`,
-              '',
-              '📝 Recent Entries:',
-              '━━━━━━━━━━━━━━━━━━━━',
-              ...entries.slice(-5), // Show last 5 entries
-              '',
-              'View full report in Google Sheets'
-            ].join('\n');
-
-            await this.bot.sendMessage(chatId, report);
-          } catch (error) {
-            console.error('Error generating monthly report:', error);
-            Sentry.captureException(error);
-            await this.bot.sendMessage(chatId, '❌ Error generating monthly report. Please try again later.');
+      if (data.startsWith('view_collection_')) {
+        const parts = data.split('_');
+        const viewType = parts[2];
+        const viewMonth = parts[3];
+        const viewYear = parseInt(parts[4]);
+        
+        const viewCollectionType: CollectionSheet = {
+          type: viewType as 'maintenance' | 'water' | 'other',
+          month: viewMonth,
+          year: viewYear
+        };
+        
+        try {
+          const collection = await this.googleSheetsService.getCollection(viewCollectionType);
+          if (!collection || collection.length === 0) {
+            await this.bot.sendMessage(chatId, 'No data found for this collection.');
+            return;
           }
-          break;
 
-        case 'quarterly_report':
-          await this.bot.sendMessage(chatId, '📈 Generating quarterly report...');
-          // TODO: Implement quarterly report
-          break;
+          let message = `📋 ${viewType === 'other' ? collection[0].description : viewType.charAt(0).toUpperCase() + viewType.slice(1)} Collection - ${viewMonth} ${viewYear}\n\n`;
+          
+          const totalAmount = collection.reduce((sum, item) => sum + item.amount, 0);
+          const paidAmount = collection
+            .filter(item => item.status === 'Paid')
+            .reduce((sum, item) => sum + item.amount, 0);
+          
+          message += `Total Amount: ₹${totalAmount.toLocaleString('en-IN')}\n`;
+          message += `Paid Amount: ₹${paidAmount.toLocaleString('en-IN')}\n`;
+          message += `Pending Amount: ₹${(totalAmount - paidAmount).toLocaleString('en-IN')}\n\n`;
+          
+          message += 'Flat-wise Status:\n\n';
+          collection.forEach(item => {
+            message += `Flat ${item.flatNumber} (${item.ownerName})\n`;
+            message += `Amount: ₹${item.amount.toLocaleString('en-IN')}\n`;
+            message += `Status: ${item.status === 'Paid' ? '✅ Paid' : '⏳ Pending'}\n`;
+            if (item.status === 'Paid' && item.paymentDate) {
+              message += `Payment Date: ${item.paymentDate}\n`;
+              message += `Marked by: ${item.markedBy || 'Unknown'}\n`;
+            }
+            message += '\n';
+          });
 
-        case 'manage_flats':
           const keyboard = {
             inline_keyboard: [
-              [
-                { text: '➕ Add Flat', callback_data: 'add_flat' },
-                { text: '📝 Update Flat', callback_data: 'update_flat' }
-              ],
-              [
-                { text: '👥 View All Flats', callback_data: 'view_flats' },
-                { text: '🔍 Search Flat', callback_data: 'search_flat' }
-              ],
-              [
-                { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
-              ]
+              [{ text: '📝 Update Payment Status', callback_data: `update_collection_${viewType}_${viewMonth}_${viewYear}` }],
+              [{ text: '🔙 Back to Collections', callback_data: 'view_collections' }]
             ]
           };
 
+          await this.bot.sendMessage(chatId, message, { reply_markup: keyboard });
+        } catch (error) {
+          console.error('Error viewing collection:', error);
+          await this.bot.sendMessage(chatId, '❌ Error retrieving collection data. Please try again.');
+        }
+      } else if (data.startsWith('update_collection_')) {
+        const parts = data.split('_');
+        const updateType = parts[2];
+        const updateMonth = parts[3];
+        const updateYear = parseInt(parts[4]);
+        
+        const updateCollectionType: CollectionSheet = {
+          type: updateType as 'maintenance' | 'water' | 'other',
+          month: updateMonth,
+          year: updateYear
+        };
+        
+        try {
+          const collection = await this.googleSheetsService.getCollection(updateCollectionType);
+          if (!collection || collection.length === 0) {
+            await this.bot.sendMessage(chatId, 'No data found for this collection.');
+            return;
+          }
+
+          // Create keyboard with flat options
+          const keyboard = {
+            inline_keyboard: collection.map(item => [{
+              text: `Flat ${item.flatNumber} (${item.status === 'Paid' ? '✅' : '⏳'})`,
+              callback_data: `update_flat_${item.flatNumber}_${updateType}_${updateMonth}_${updateYear}`
+            }])
+          };
+
+          // Add back button
+          keyboard.inline_keyboard.push([{ text: '🔙 Back', callback_data: `view_collection_${updateType}_${updateMonth}_${updateYear}` }]);
+
           await this.bot.sendMessage(
             chatId,
-            '🏢 Flat Management\n\n' +
-            'Please select an option:',
+            'Select a flat to update its payment status:',
             { reply_markup: keyboard }
           );
-          break;
+        } catch (error) {
+          console.error('Error handling update collection:', error);
+          await this.bot.sendMessage(chatId, 'An error occurred while fetching collection data.');
+        }
+      } else if (data.startsWith('update_flat_')) {
+        const parts = data.split('_');
+        const flatNumber = parts[2];
+        const updateType = parts[3];
+        const updateMonth = parts[4];
+        const updateYear = parseInt(parts[5]);
+        
+        const updateCollectionType: CollectionSheet = {
+          type: updateType as 'maintenance' | 'water' | 'other',
+          month: updateMonth,
+          year: updateYear
+        };
+        
+        await this.handleFlatPaymentUpdate(chatId, flatNumber, userState.userName || 'Unknown', updateCollectionType);
+      } else {
+        // Handle other cases
+        switch (data) {
+          case 'add_expense':
+            userState.type = 'expense';
+            this.userStates.set(chatId, userState);
+            await this.bot.sendMessage(
+              chatId,
+              'Please enter the expense details in the following format:\n' +
+              'Amount, Category, Description\n' +
+              'Example: 1000, Maintenance, Monthly cleaning\n\n' +
+              'Or upload a receipt image.'
+            );
+            break;
 
-        case 'view_flats':
-          try {
-            const flats = await this.googleSheetsService.getAllFlats();
-            if (!flats || flats.length === 0) {
-              await this.bot.sendMessage(chatId, 'No flats found in the database.');
-              return;
-            }
+          case 'add_income':
+            userState.type = 'income';
+            this.userStates.set(chatId, userState);
+            await this.bot.sendMessage(
+              chatId,
+              'Please enter the income details in the following format:\n' +
+              'Amount, Category, Description\n' +
+              'Example: 5000, Dues, Monthly maintenance\n\n' +
+              'Or upload a receipt image.'
+            );
+            break;
 
-            let message = '🏢 All Flats Information:\n\n';
-            for (const flat of flats) {
-              message += `Flat ${flat.flatNumber}:\n`;
-              message += `Floor: ${flat.floorNumber}\n`;
-              message += `Owner: ${flat.ownerName}\n`;
-              if (flat.tenantName) {
-                message += `Tenant: ${flat.tenantName}\n`;
+          case 'monthly_report':
+            try {
+              await this.bot.sendMessage(chatId, '📊 Generating monthly report...');
+              
+              // Get current month's data
+              const date = new Date();
+              const month = date.toLocaleString('default', { month: 'long' });
+              const year = date.getFullYear();
+              const sheetName = `${month} ${year}`;
+
+              // Get data from Google Sheets
+              const response = await this.googleSheetsService.getSheetData(sheetName);
+              if (!response || response.length <= 2) { // Only headers and totals
+                await this.bot.sendMessage(chatId, 'No entries found for this month.');
+                return;
               }
-              message += `Maintenance: ₹${flat.maintenanceAmount.toLocaleString('en-IN')}\n`;
-              message += `Phone: ${flat.phoneNumber}\n`;
-              if (flat.email) {
-                message += `Email: ${flat.email}\n`;
-              }
-              message += `Status: ${flat.isOccupied ? 'Occupied' : 'Vacant'}\n`;
-              message += `Last Updated: ${new Date(flat.lastUpdated).toLocaleString()}\n\n`;
-            }
 
-            const backKeyboard = {
+              // Calculate totals
+              let totalExpenses = 0;
+              let totalIncome = 0;
+              const entries: string[] = [];
+
+              // Start from index 2 to skip headers and totals row
+              for (let i = 2; i < response.length; i++) {
+                const row = response[i];
+                const amountStr = row[4]?.replace(/[₹,]/g, '') || '0';
+                const amount = parseFloat(amountStr);
+                
+                if (row[1]?.toLowerCase() === 'expense') {
+                  totalExpenses += amount;
+                } else if (row[1]?.toLowerCase() === 'income') {
+                  totalIncome += amount;
+                }
+
+                // Format entry for report
+                entries.push(
+                  `${row[0]} - ${row[1].toUpperCase()} - ${row[2]}\n` +
+                  `${row[3]} - ${row[4]}`
+                );
+              }
+
+              const netBalance = totalIncome - totalExpenses;
+              const balanceEmoji = netBalance >= 0 ? '🟢' : '🔴';
+
+              // Create report message
+              const report = [
+                `📊 Monthly Report - ${month} ${year}`,
+                '━━━━━━━━━━━━━━━━━━━━',
+                '',
+                `💰 Total Income: ₹${totalIncome.toLocaleString('en-IN')}`,
+                `💸 Total Expenses: ₹${totalExpenses.toLocaleString('en-IN')}`,
+                `${balanceEmoji} Net Balance: ${netBalance >= 0 ? '+' : ''}₹${netBalance.toLocaleString('en-IN')}`,
+                '',
+                '📝 Recent Entries:',
+                '━━━━━━━━━━━━━━━━━━━━',
+                ...entries.slice(-5), // Show last 5 entries
+                '',
+                'View full report in Google Sheets'
+              ].join('\n');
+
+              await this.bot.sendMessage(chatId, report);
+            } catch (error) {
+              console.error('Error generating monthly report:', error);
+              Sentry.captureException(error);
+              await this.bot.sendMessage(chatId, '❌ Error generating monthly report. Please try again later.');
+            }
+            break;
+
+          case 'quarterly_report':
+            await this.bot.sendMessage(chatId, '📈 Generating quarterly report...');
+            // TODO: Implement quarterly report
+            break;
+
+          case 'manage_flats':
+            const keyboard = {
               inline_keyboard: [
                 [
-                  { text: '🔙 Back to Flat Management', callback_data: 'manage_flats' }
-                ]
-              ]
-            };
-
-            await this.bot.sendMessage(chatId, message, { reply_markup: backKeyboard });
-          } catch (error) {
-            console.error('Error viewing flats:', error);
-            await this.bot.sendMessage(chatId, '❌ Error retrieving flat information. Please try again.');
-          }
-          break;
-
-        case 'add_flat':
-          this.userStates.set(chatId, {
-            type: 'flat_info',
-            pendingQuestions: [
-              'Enter flat number:',
-              'Enter floor number:',
-              'Enter owner name:',
-              'Enter maintenance amount:',
-              'Enter phone number:',
-              'Is the flat occupied? (yes/no):',
-              'If occupied, enter tenant name (or press skip):',
-              'Enter email (or press skip):'
-            ]
-          });
-          await this.bot.sendMessage(chatId, 'Enter flat number:');
-          break;
-
-        case 'collect_maintenance':
-          try {
-            // Initialize maintenance collection sheet first
-            await this.googleSheetsService.initializeMaintenanceCollection();
-            
-            const flats = await this.googleSheetsService.getAllFlats();
-            const currentDate = new Date();
-            const currentQuarter = Math.floor(currentDate.getMonth() / 3) + 1;
-            const currentYear = currentDate.getFullYear();
-
-            let message = `💰 Maintenance Collection - Q${currentQuarter} ${currentYear}\n\n`;
-            let totalExpected = 0;
-
-            for (const flat of flats) {
-              totalExpected += flat.maintenanceAmount;
-              message += `Flat ${flat.flatNumber}:\n`;
-              message += `Owner: ${flat.ownerName}\n`;
-              message += `Amount: ₹${flat.maintenanceAmount.toLocaleString('en-IN')}\n`;
-              message += `Phone: ${flat.phoneNumber}\n\n`;
-            }
-
-            message += `\nTotal Expected: ₹${totalExpected.toLocaleString('en-IN')}`;
-
-            const maintenanceKeyboard = {
-              inline_keyboard: [
+                  { text: '➕ Add Flat', callback_data: 'add_flat' },
+                  { text: '📝 Update Flat', callback_data: 'update_flat' }
+                ],
                 [
-                  { text: '📝 Update Payment Status', callback_data: 'update_payment_status' },
-                  { text: '📊 Collection Report', callback_data: 'collection_report' }
+                  { text: '👥 View All Flats', callback_data: 'view_flats' },
+                  { text: '🔍 Search Flat', callback_data: 'search_flat' }
                 ],
                 [
                   { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
@@ -642,46 +669,348 @@ export class TelegramService implements OnModuleInit {
               ]
             };
 
-            await this.bot.sendMessage(chatId, message, { reply_markup: maintenanceKeyboard });
-          } catch (error) {
-            console.error('Error in collect_maintenance:', error);
-            await this.bot.sendMessage(chatId, '❌ Error initializing maintenance collection. Please try again.');
-          }
-          break;
+            await this.bot.sendMessage(
+              chatId,
+              '🏢 Flat Management\n\n' +
+              'Please select an option:',
+              { reply_markup: keyboard }
+            );
+            break;
 
-        case 'main_menu':
-          const mainKeyboard = {
-            inline_keyboard: [
-              [
-                { text: '➕ Add Expense', callback_data: 'add_expense' },
-                { text: '➕ Add Income', callback_data: 'add_income' }
-              ],
-              [
-                { text: '📊 Monthly Report', callback_data: 'monthly_report' },
-                { text: '📈 Quarterly Report', callback_data: 'quarterly_report' }
-              ],
-              [
-                { text: '🏢 Manage Flats', callback_data: 'manage_flats' },
-                { text: '💰 Collect Maintenance', callback_data: 'collect_maintenance' }
+          case 'view_flats':
+            try {
+              const flats = await this.googleSheetsService.getAllFlats();
+              if (!flats || flats.length === 0) {
+                await this.bot.sendMessage(chatId, 'No flats found in the database.');
+                return;
+              }
+
+              let message = '🏢 All Flats Information:\n\n';
+              for (const flat of flats) {
+                message += `Flat ${flat.flatNumber}:\n`;
+                message += `Floor: ${flat.floorNumber}\n`;
+                message += `Owner: ${flat.ownerName}\n`;
+                if (flat.tenantName) {
+                  message += `Tenant: ${flat.tenantName}\n`;
+                }
+                message += `Maintenance: ₹${flat.maintenanceAmount.toLocaleString('en-IN')}\n`;
+                message += `Phone: ${flat.phoneNumber}\n`;
+                if (flat.email) {
+                  message += `Email: ${flat.email}\n`;
+                }
+                message += `Status: ${flat.isOccupied ? 'Occupied' : 'Vacant'}\n`;
+                message += `Last Updated: ${new Date(flat.lastUpdated).toLocaleString()}\n\n`;
+              }
+
+              const backKeyboard = {
+                inline_keyboard: [
+                  [
+                    { text: '🔙 Back to Flat Management', callback_data: 'manage_flats' }
+                  ]
+                ]
+              };
+
+              await this.bot.sendMessage(chatId, message, { reply_markup: backKeyboard });
+            } catch (error) {
+              console.error('Error viewing flats:', error);
+              await this.bot.sendMessage(chatId, '❌ Error retrieving flat information. Please try again.');
+            }
+            break;
+
+          case 'add_flat':
+            this.userStates.set(chatId, {
+              type: 'flat_info',
+              pendingQuestions: [
+                'Enter flat number:',
+                'Enter floor number:',
+                'Enter owner name:',
+                'Enter maintenance amount:',
+                'Enter phone number:',
+                'Is the flat occupied? (yes/no):',
+                'If occupied, enter tenant name (or press skip):',
+                'Enter email (or press skip):'
               ]
-            ]
-          };
+            });
+            await this.bot.sendMessage(chatId, 'Enter flat number:');
+            break;
 
-          await this.bot.sendMessage(
-            chatId,
-            'Welcome to the Flat Association Expense Bot! 🏢\n\n' +
-            'Please select an option:',
-            { reply_markup: mainKeyboard }
-          );
-          break;
+          case 'collect_maintenance':
+            try {
+              const currentDate = new Date();
+              const collectionType: CollectionSheet = {
+                type: 'maintenance',
+                month: currentDate.toLocaleString('default', { month: 'long' }),
+                year: currentDate.getFullYear()
+              };
+              
+              // Initialize maintenance collection sheet first
+              await this.googleSheetsService.initializeCollection(collectionType, 0);
+              
+              const flats = await this.googleSheetsService.getAllFlats();
+              const currentQuarter = Math.floor(currentDate.getMonth() / 3) + 1;
 
-        case 'maintenance_collection':
-          await this.handleMaintenanceCollection(chatId);
-          break;
+              let message = `💰 Maintenance Collection - Q${currentQuarter} ${currentDate.getFullYear()}\n\n`;
+              let totalExpected = 0;
 
-        case 'update_payment_status':
-          await this.handleUpdatePaymentStatus(chatId);
-          break;
+              for (const flat of flats) {
+                totalExpected += flat.maintenanceAmount;
+                message += `Flat ${flat.flatNumber}:\n`;
+                message += `Owner: ${flat.ownerName}\n`;
+                message += `Amount: ₹${flat.maintenanceAmount.toLocaleString('en-IN')}\n`;
+                message += `Phone: ${flat.phoneNumber}\n\n`;
+              }
+
+              message += `\nTotal Expected: ₹${totalExpected.toLocaleString('en-IN')}`;
+
+              const maintenanceKeyboard = {
+                inline_keyboard: [
+                  [
+                    { text: '📝 Update Payment Status', callback_data: 'update_payment_status' },
+                    { text: '📊 Collection Report', callback_data: 'collection_report' }
+                  ],
+                  [
+                    { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
+                  ]
+                ]
+              };
+
+              await this.bot.sendMessage(chatId, message, { reply_markup: maintenanceKeyboard });
+            } catch (error) {
+              console.error('Error in collect_maintenance:', error);
+              await this.bot.sendMessage(chatId, '❌ Error initializing maintenance collection. Please try again.');
+            }
+            break;
+
+          case 'create_collection':
+            const collectionKeyboard = {
+              inline_keyboard: [
+                [
+                  { text: '💧 Water Bill', callback_data: 'create_water_collection' },
+                  { text: '🔧 Maintenance', callback_data: 'create_maintenance_collection' }
+                ],
+                [
+                  { text: '📝 Other Collection', callback_data: 'create_other_collection' }
+                ],
+                [
+                  { text: '📊 View Existing Collections', callback_data: 'view_collections' }
+                ],
+                [
+                  { text: '🔙 Back to Main Menu', callback_data: 'main_menu' }
+                ]
+              ]
+            };
+
+            await this.bot.sendMessage(
+              chatId,
+              '📋 Create New Collection\n\n' +
+              'Select the type of collection to create:',
+              { reply_markup: collectionKeyboard }
+            );
+            break;
+
+          case 'view_collections':
+            try {
+              const collections = await this.googleSheetsService.getAllCollections();
+              if (!collections || collections.length === 0) {
+                await this.bot.sendMessage(chatId, 'No collections found.');
+                return;
+              }
+
+              const keyboard = {
+                inline_keyboard: collections.map(collection => [{
+                  text: `${collection.type === 'other' ? collection.description : collection.type.charAt(0).toUpperCase() + collection.type.slice(1)} - ${collection.month} ${collection.year}`,
+                  callback_data: `view_collection_${collection.type}_${collection.month}_${collection.year}`
+                }])
+              };
+
+              // Add back button
+              keyboard.inline_keyboard.push([{ text: '🔙 Back', callback_data: 'create_collection' }]);
+
+              await this.bot.sendMessage(
+                chatId,
+                'Select a collection to view or update:',
+                { reply_markup: keyboard }
+              );
+            } catch (error) {
+              console.error('Error viewing collections:', error);
+              await this.bot.sendMessage(chatId, '❌ Error retrieving collections. Please try again.');
+            }
+            break;
+
+          case 'create_water_collection':
+            this.userStates.set(chatId, {
+              type: 'collection_info',
+              pendingQuestions: [
+                'Enter the amount per flat:',
+                'Enter any additional description (or press skip):'
+              ],
+              collectionType: {
+                type: 'water',
+                month: new Date().toLocaleString('default', { month: 'long' }),
+                year: new Date().getFullYear()
+              }
+            });
+            await this.bot.sendMessage(chatId, 'Enter the amount per flat:');
+            break;
+
+          case 'create_other_collection':
+            this.userStates.set(chatId, {
+              type: 'collection_info',
+              pendingQuestions: [
+                'Enter collection name:',
+                'Enter the amount per flat:',
+                'Enter any additional description (or press skip):'
+              ],
+              collectionType: {
+                type: 'other',
+                month: new Date().toLocaleString('default', { month: 'long' }),
+                year: new Date().getFullYear()
+              }
+            });
+            await this.bot.sendMessage(chatId, 'Enter collection name:');
+            break;
+
+          case 'main_menu':
+            const mainKeyboard = {
+              inline_keyboard: [
+                [
+                  { text: '➕ Add Expense', callback_data: 'add_expense' },
+                  { text: '➕ Add Income', callback_data: 'add_income' }
+                ],
+                [
+                  { text: '📊 Monthly Report', callback_data: 'monthly_report' },
+                  { text: '📈 Quarterly Report', callback_data: 'quarterly_report' }
+                ],
+                [
+                  { text: '🏢 Manage Flats', callback_data: 'manage_flats' },
+                  { text: '💰 Collect Maintenance', callback_data: 'collect_maintenance' }
+                ],
+                [
+                  { text: '📋 Create Collection', callback_data: 'create_collection' }
+                ]
+              ]
+            };
+
+            await this.bot.sendMessage(
+              chatId,
+              'Welcome to the Flat Association Expense Bot! 🏢\n\n' +
+              'Please select an option:',
+              { reply_markup: mainKeyboard }
+            );
+            break;
+
+          case 'maintenance_collection':
+            await this.handleCollectionInfoInput(chatId, {
+              type: 'collection_info',
+              collectionType: {
+                type: 'maintenance',
+                month: new Date().toLocaleString('default', { month: 'long' }),
+                year: new Date().getFullYear()
+              }
+            }, '');
+            break;
+
+          case 'update_payment_status':
+            await this.handleUpdatePaymentStatus(chatId);
+            break;
+
+          case 'view_collection_':
+            const viewParts = data.split('_');
+            const viewType = viewParts[2];
+            const viewMonth = viewParts[3];
+            const viewYear = parseInt(viewParts[4]);
+            
+            const viewCollectionType: CollectionSheet = {
+              type: viewType as 'maintenance' | 'water' | 'other',
+              month: viewMonth,
+              year: viewYear
+            };
+            
+            try {
+              const collection = await this.googleSheetsService.getCollection(viewCollectionType);
+              if (!collection || collection.length === 0) {
+                await this.bot.sendMessage(chatId, 'No data found for this collection.');
+                return;
+              }
+
+              let message = `📋 ${viewType === 'other' ? collection[0].description : viewType.charAt(0).toUpperCase() + viewType.slice(1)} Collection - ${viewMonth} ${viewYear}\n\n`;
+              
+              const totalAmount = collection.reduce((sum, item) => sum + item.amount, 0);
+              const paidAmount = collection
+                .filter(item => item.status === 'Paid')
+                .reduce((sum, item) => sum + item.amount, 0);
+              
+              message += `Total Amount: ₹${totalAmount.toLocaleString('en-IN')}\n`;
+              message += `Paid Amount: ₹${paidAmount.toLocaleString('en-IN')}\n`;
+              message += `Pending Amount: ₹${(totalAmount - paidAmount).toLocaleString('en-IN')}\n\n`;
+              
+              message += 'Flat-wise Status:\n\n';
+              collection.forEach(item => {
+                message += `Flat ${item.flatNumber} (${item.ownerName})\n`;
+                message += `Amount: ₹${item.amount.toLocaleString('en-IN')}\n`;
+                message += `Status: ${item.status === 'Paid' ? '✅ Paid' : '⏳ Pending'}\n`;
+                if (item.status === 'Paid' && item.paymentDate) {
+                  message += `Payment Date: ${item.paymentDate}\n`;
+                  message += `Marked by: ${item.markedBy || 'Unknown'}\n`;
+                }
+                message += '\n';
+              });
+
+              const keyboard = {
+                inline_keyboard: [
+                  [{ text: '📝 Update Payment Status', callback_data: `update_collection_${viewType}_${viewMonth}_${viewYear}` }],
+                  [{ text: '🔙 Back to Collections', callback_data: 'view_collections' }]
+                ]
+              };
+
+              await this.bot.sendMessage(chatId, message, { reply_markup: keyboard });
+            } catch (error) {
+              console.error('Error viewing collection:', error);
+              await this.bot.sendMessage(chatId, '❌ Error retrieving collection data. Please try again.');
+            }
+            break;
+
+          case 'update_collection_':
+            const updateParts = data.split('_');
+            const updateType = updateParts[2];
+            const updateMonth = updateParts[3];
+            const updateYear = parseInt(updateParts[4]);
+            
+            const updateCollectionType: CollectionSheet = {
+              type: updateType as 'maintenance' | 'water' | 'other',
+              month: updateMonth,
+              year: updateYear
+            };
+            
+            try {
+              const collection = await this.googleSheetsService.getCollection(updateCollectionType);
+              if (!collection || collection.length === 0) {
+                await this.bot.sendMessage(chatId, 'No data found for this collection.');
+                return;
+              }
+
+              // Create keyboard with flat options
+              const keyboard = {
+                inline_keyboard: collection.map(item => [{
+                  text: `Flat ${item.flatNumber} (${item.status === 'Paid' ? '✅' : '⏳'})`,
+                  callback_data: `update_flat_${item.flatNumber}_${updateType}_${updateMonth}_${updateYear}`
+                }])
+              };
+
+              // Add back button
+              keyboard.inline_keyboard.push([{ text: '🔙 Back', callback_data: `view_collection_${updateType}_${updateMonth}_${updateYear}` }]);
+
+              await this.bot.sendMessage(
+                chatId,
+                'Select a flat to update its payment status:',
+                { reply_markup: keyboard }
+              );
+            } catch (error) {
+              console.error('Error handling update collection:', error);
+              await this.bot.sendMessage(chatId, 'An error occurred while fetching collection data.');
+            }
+            break;
+        }
       }
 
       // Answer the callback query to remove the loading state
@@ -809,7 +1138,7 @@ export class TelegramService implements OnModuleInit {
         console.log('Gemini AI extracted info:', extractedInfo);
         
         // Set the type from user state
-        if (userState.type !== 'flat_info') {
+        if (userState.type === 'expense' || userState.type === 'income') {
           extractedInfo.type = userState.type;
         }
         
@@ -876,9 +1205,14 @@ export class TelegramService implements OnModuleInit {
           ],
           [
             { text: '📊 Monthly Report', callback_data: 'monthly_report' },
-            { text: '📈 Quarterly Report', callback_data: 'quarterly_report' },
+            { text: '📈 Quarterly Report', callback_data: 'quarterly_report' }
+          ],
+          [
             { text: '🏢 Manage Flats', callback_data: 'manage_flats' },
             { text: '💰 Collect Maintenance', callback_data: 'collect_maintenance' }
+          ],
+          [
+            { text: '📋 Create Collection', callback_data: 'create_collection' }
           ]
         ]
       };
@@ -912,6 +1246,12 @@ export class TelegramService implements OnModuleInit {
     // Handle flat info input
     if (userState.type === 'flat_info') {
       await this.handleFlatInfoInput(chatId, userState, text);
+      return;
+    }
+
+    // Handle collection info input
+    if (userState.type === 'collection_info') {
+      await this.handleCollectionInfoInput(chatId, userState, text);
       return;
     }
 
@@ -1005,67 +1345,99 @@ export class TelegramService implements OnModuleInit {
     }
   }
 
-  private async handleMaintenanceCollection(chatId: number) {
-    try {
-      // Initialize maintenance collection if not already done
-      await this.googleSheetsService.initializeMaintenanceCollection();
-      
-      // Get current maintenance collection
-      const collection = await this.googleSheetsService.getMaintenanceCollection();
-      
-      if (collection.length === 0) {
-        await this.bot.sendMessage(chatId, 'No maintenance collection data available.');
+  private async handleCollectionInfoInput(chatId: number, userState: UserState, text: string) {
+    if (!userState.pendingQuestions || userState.pendingQuestions.length === 0) {
+      return;
+    }
+
+    const currentQuestion = userState.pendingQuestions[0];
+    const answer = text.trim();
+    const remainingQuestions = userState.pendingQuestions.slice(1);
+    const collectionType = userState.collectionType as CollectionSheet;
+
+    if (currentQuestion.includes('amount')) {
+      const amount = parseFloat(answer);
+      if (isNaN(amount) || amount <= 0) {
+        await this.bot.sendMessage(chatId, '❌ Please enter a valid amount greater than 0.');
         return;
       }
 
-      // Calculate totals
-      const totalAmount = collection.reduce((sum, item) => sum + item.amount, 0);
-      const paidAmount = collection
-        .filter(item => item.status === 'Paid')
-        .reduce((sum, item) => sum + item.amount, 0);
-      const pendingAmount = totalAmount - paidAmount;
+      try {
+        await this.googleSheetsService.initializeCollection(collectionType, amount);
+        await this.bot.sendMessage(chatId, '✅ Collection sheet created successfully!');
+        
+        // Show collection details
+        const collection = await this.googleSheetsService.getCollection(collectionType);
+        let message = `📋 ${collectionType.type === 'other' ? collectionType.description : collectionType.type.charAt(0).toUpperCase() + collectionType.type.slice(1)} Collection - ${collectionType.month} ${collectionType.year}\n\n`;
+        
+        const totalAmount = collection.reduce((sum, item) => sum + item.amount, 0);
+        const paidAmount = collection
+          .filter(item => item.status === 'Paid')
+          .reduce((sum, item) => sum + item.amount, 0);
+        
+        message += `Total Amount: ₹${totalAmount.toLocaleString('en-IN')}\n`;
+        message += `Paid Amount: ₹${paidAmount.toLocaleString('en-IN')}\n`;
+        message += `Pending Amount: ₹${(totalAmount - paidAmount).toLocaleString('en-IN')}\n\n`;
+        
+        message += 'Flat-wise Status:\n\n';
+        collection.forEach(item => {
+          message += `Flat ${item.flatNumber} (${item.ownerName})\n`;
+          message += `Amount: ₹${item.amount.toLocaleString('en-IN')}\n`;
+          message += `Status: ${item.status === 'Paid' ? '✅ Paid' : '⏳ Pending'}\n\n`;
+        });
 
-      // Create message with collection details
-      let message = '📊 *Maintenance Collection Status*\n\n';
-      message += `Total Amount: ₹${totalAmount.toLocaleString('en-IN')}\n`;
-      message += `Paid Amount: ₹${paidAmount.toLocaleString('en-IN')}\n`;
-      message += `Pending Amount: ₹${pendingAmount.toLocaleString('en-IN')}\n\n`;
-      message += '*Flat-wise Status:*\n\n';
+        const keyboard = {
+          inline_keyboard: [
+            [{ text: '📝 Update Payment Status', callback_data: 'update_payment_status' }],
+            [{ text: '🔙 Back to Main Menu', callback_data: 'main_menu' }]
+          ]
+        };
 
-      collection.forEach(item => {
-        message += `*Flat ${item.flatNumber}* (${item.ownerName})\n`;
-        message += `Amount: ₹${item.amount.toLocaleString('en-IN')}\n`;
-        message += `Status: ${item.status === 'Paid' ? '✅ Paid' : '⏳ Pending'}\n`;
-        if (item.status === 'Paid' && item.paymentDate) {
-          message += `Payment Date: ${item.paymentDate}\n`;
-        }
-        message += '\n';
-      });
-
-      // Create inline keyboard for updating payment status
-      const keyboard = {
-        inline_keyboard: [
-          [{ text: '📝 Update Payment Status', callback_data: 'update_payment_status' }],
-          [{ text: '🔙 Back to Main Menu', callback_data: 'main_menu' }]
-        ]
-      };
-
-      await this.bot.sendMessage(chatId, message, {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard
-      });
-    } catch (error) {
-      console.error('Error handling maintenance collection:', error);
-      await this.bot.sendMessage(chatId, 'An error occurred while fetching maintenance collection data.');
+        await this.bot.sendMessage(chatId, message, { reply_markup: keyboard });
+        this.userStates.delete(chatId);
+      } catch (error) {
+        console.error('Error creating collection:', error);
+        await this.bot.sendMessage(chatId, '❌ Error creating collection sheet. Please try again.');
+      }
+    } else if (currentQuestion.includes('name')) {
+      // For other collections, store the name in description
+      collectionType.description = answer;
+      if (remainingQuestions.length > 0) {
+        this.userStates.set(chatId, {
+          ...userState,
+          pendingQuestions: remainingQuestions,
+          collectionType
+        });
+        await this.bot.sendMessage(chatId, remainingQuestions[0]);
+      }
+    } else if (currentQuestion.includes('description')) {
+      if (answer.toLowerCase() !== 'skip') {
+        collectionType.description = answer;
+      }
+      if (remainingQuestions.length > 0) {
+        this.userStates.set(chatId, {
+          ...userState,
+          pendingQuestions: remainingQuestions,
+          collectionType
+        });
+        await this.bot.sendMessage(chatId, remainingQuestions[0]);
+      }
     }
   }
 
   private async handleUpdatePaymentStatus(chatId: number) {
     try {
-      const collection = await this.googleSheetsService.getMaintenanceCollection();
+      const currentDate = new Date();
+      const collectionType: CollectionSheet = {
+        type: 'maintenance',
+        month: currentDate.toLocaleString('default', { month: 'long' }),
+        year: currentDate.getFullYear()
+      };
+      
+      const collection = await this.googleSheetsService.getCollection(collectionType);
       
       if (collection.length === 0) {
-        await this.bot.sendMessage(chatId, 'No maintenance collection data available.');
+        await this.bot.sendMessage(chatId, 'No collection data available.');
         return;
       }
 
@@ -1091,18 +1463,27 @@ export class TelegramService implements OnModuleInit {
     }
   }
 
-  private async handleFlatPaymentUpdate(chatId: number, flatNumber: string, username: string) {
+  private async handleFlatPaymentUpdate(chatId: number, flatNumber: string, username: string, collectionType?: CollectionSheet) {
     try {
-      const collection = await this.googleSheetsService.getMaintenanceCollection();
+      if (!collectionType) {
+        const currentDate = new Date();
+        collectionType = {
+          type: 'maintenance',
+          month: currentDate.toLocaleString('default', { month: 'long' }),
+          year: currentDate.getFullYear()
+        };
+      }
+      
+      const collection = await this.googleSheetsService.getCollection(collectionType);
       const flat = collection.find(item => item.flatNumber === flatNumber);
 
       if (!flat) {
-        await this.bot.sendMessage(chatId, 'Flat not found in maintenance collection.');
+        await this.bot.sendMessage(chatId, 'Flat not found in collection.');
         return;
       }
 
       const newStatus = flat.status === 'Paid' ? 'Pending' : 'Paid';
-      await this.googleSheetsService.updateMaintenanceStatus(flatNumber, newStatus, username);
+      await this.googleSheetsService.updateCollectionStatus(collectionType, flatNumber, newStatus, username);
 
       // Show updated status
       const message = `Payment status updated for Flat ${flatNumber}:\n\n` +
@@ -1113,8 +1494,8 @@ export class TelegramService implements OnModuleInit {
 
       const keyboard = {
         inline_keyboard: [
-          [{ text: '🔄 Update Another Flat', callback_data: 'update_payment_status' }],
-          [{ text: '🔙 Back to Collection', callback_data: 'maintenance_collection' }]
+          [{ text: '🔄 Update Another Flat', callback_data: `update_collection_${collectionType.type}_${collectionType.month}_${collectionType.year}` }],
+          [{ text: '🔙 Back to Collection', callback_data: `view_collection_${collectionType.type}_${collectionType.month}_${collectionType.year}` }]
         ]
       };
 

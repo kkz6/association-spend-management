@@ -30,9 +30,17 @@ interface MaintenanceCollection {
   flatNumber: string;
   ownerName: string;
   amount: number;
-  status: 'Pending' | 'Paid';
+  status: 'Paid' | 'Pending';
   paymentDate?: string;
-  addedBy?: string;
+  markedBy?: string;
+  description?: string;
+}
+
+interface CollectionSheet {
+  type: 'maintenance' | 'water' | 'other';
+  month: string;
+  year: number;
+  description?: string;
 }
 
 @Injectable()
@@ -575,22 +583,25 @@ export class GoogleSheetsService {
     }
   }
 
-  private async getOrCreateMaintenanceSheet(): Promise<string> {
+  private async getOrCreateCollectionSheet(collectionType: CollectionSheet): Promise<string> {
     try {
-      const date = new Date();
-      const quarter = Math.floor(date.getMonth() / 3) + 1;
-      const year = date.getFullYear();
-      const sheetName = `Q${quarter} ${year}`;
+      let sheetName: string;
+      if (collectionType.type === 'maintenance') {
+        const quarter = Math.floor(new Date().getMonth() / 3) + 1;
+        sheetName = `Q${quarter} ${collectionType.year}`;
+      } else {
+        sheetName = `${collectionType.type} ${collectionType.month} ${collectionType.year}`;
+      }
 
-      // Get the maintenance collection spreadsheet ID from environment
-      const maintenanceSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
-      if (!maintenanceSheetId) {
+      // Get the collection spreadsheet ID from environment
+      const collectionSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
+      if (!collectionSheetId) {
         throw new Error('MAINTENANCE_SPREADSHEET_ID is not defined in environment variables');
       }
 
-      // Check if sheet exists in the maintenance collection spreadsheet
+      // Check if sheet exists in the collection spreadsheet
       const response = await this.sheets.spreadsheets.get({
-        spreadsheetId: maintenanceSheetId,
+        spreadsheetId: collectionSheetId,
       });
 
       const sheetExists = response.data.sheets?.some(
@@ -598,10 +609,10 @@ export class GoogleSheetsService {
       );
 
       if (!sheetExists) {
-        console.log('Creating new quarter sheet:', sheetName);
+        console.log('Creating new collection sheet:', sheetName);
         // Create new sheet
         const createResponse = await this.sheets.spreadsheets.batchUpdate({
-          spreadsheetId: maintenanceSheetId,
+          spreadsheetId: collectionSheetId,
           requestBody: {
             requests: [
               {
@@ -624,7 +635,7 @@ export class GoogleSheetsService {
 
         // Add headers
         await this.sheets.spreadsheets.values.update({
-          spreadsheetId: maintenanceSheetId,
+          spreadsheetId: collectionSheetId,
           range: `${sheetName}!A1:F1`,
           valueInputOption: 'RAW',
           requestBody: {
@@ -641,7 +652,7 @@ export class GoogleSheetsService {
 
         // Format headers using the new sheet ID
         await this.sheets.spreadsheets.batchUpdate({
-          spreadsheetId: maintenanceSheetId,
+          spreadsheetId: collectionSheetId,
           requestBody: {
             requests: [
               {
@@ -670,31 +681,31 @@ export class GoogleSheetsService {
           },
         });
 
-        console.log('Successfully created quarter sheet:', sheetName);
+        console.log('Successfully created collection sheet:', sheetName);
       }
 
       return sheetName;
     } catch (error) {
-      console.error('Error getting or creating maintenance sheet:', error);
+      console.error('Error getting or creating collection sheet:', error);
       Sentry.captureException(error);
-      throw new Error('Failed to get or create maintenance sheet');
+      throw new Error('Failed to get or create collection sheet');
     }
   }
 
-  async initializeMaintenanceCollection(): Promise<void> {
+  async initializeCollection(collectionType: CollectionSheet, amount: number): Promise<void> {
     try {
-      console.log('Initializing maintenance collection...');
-      const sheetName = await this.getOrCreateMaintenanceSheet();
+      console.log('Initializing collection:', collectionType);
+      const sheetName = await this.getOrCreateCollectionSheet(collectionType);
       const flats = await this.getAllFlats();
-      const maintenanceSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
+      const collectionSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
       
-      if (!maintenanceSheetId) {
+      if (!collectionSheetId) {
         throw new Error('MAINTENANCE_SPREADSHEET_ID is not defined in environment variables');
       }
 
       // Get existing entries
       const response = await this.sheets.spreadsheets.values.get({
-        spreadsheetId: maintenanceSheetId,
+        spreadsheetId: collectionSheetId,
         range: `${sheetName}!A:F`,
       });
 
@@ -707,48 +718,50 @@ export class GoogleSheetsService {
         .map(flat => [
           flat.flatNumber,
           flat.ownerName,
-          flat.maintenanceAmount.toString(),
+          amount.toString(),
           'Pending',
           '',
           ''
         ]);
 
       if (newEntries.length > 0) {
-        console.log('Adding new entries to maintenance sheet:', newEntries.length);
+        console.log('Adding new entries to collection sheet:', newEntries.length);
         await this.sheets.spreadsheets.values.append({
-          spreadsheetId: maintenanceSheetId,
+          spreadsheetId: collectionSheetId,
           range: `${sheetName}!A:F`,
           valueInputOption: 'RAW',
           requestBody: {
             values: newEntries
           }
         });
-        console.log('Successfully added new entries to maintenance sheet');
+        console.log('Successfully added new entries to collection sheet');
       } else {
-        console.log('No new entries to add to maintenance sheet');
+        console.log('No new entries to add to collection sheet');
       }
     } catch (error) {
-      console.error('Error initializing maintenance collection:', error);
+      console.error('Error initializing collection:', error);
       Sentry.captureException(error);
-      throw new Error('Failed to initialize maintenance collection');
+      throw new Error('Failed to initialize collection');
     }
   }
 
-  async updateMaintenanceStatus(flatNumber: string, status: 'Paid' | 'Pending', addedBy: string): Promise<void> {
+  async updateCollectionStatus(
+    collectionType: CollectionSheet,
+    flatNumber: string,
+    status: 'Paid' | 'Pending',
+    addedBy: string
+  ): Promise<void> {
     try {
-      const date = new Date();
-      const quarter = Math.floor(date.getMonth() / 3) + 1;
-      const year = date.getFullYear();
-      const sheetName = `Q${quarter} ${year}`;
-      const maintenanceSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
+      const sheetName = await this.getOrCreateCollectionSheet(collectionType);
+      const collectionSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
       
-      if (!maintenanceSheetId) {
+      if (!collectionSheetId) {
         throw new Error('MAINTENANCE_SPREADSHEET_ID is not defined in environment variables');
       }
 
       // Get all entries
       const response = await this.sheets.spreadsheets.values.get({
-        spreadsheetId: maintenanceSheetId,
+        spreadsheetId: collectionSheetId,
         range: `${sheetName}!A:F`,
       });
 
@@ -756,7 +769,7 @@ export class GoogleSheetsService {
       const flatIndex = entries.findIndex((row, index) => index > 0 && row[0] === flatNumber);
 
       if (flatIndex === -1) {
-        throw new Error('Flat not found in maintenance collection');
+        throw new Error('Flat not found in collection');
       }
 
       // Update status
@@ -770,7 +783,7 @@ export class GoogleSheetsService {
       ];
 
       await this.sheets.spreadsheets.values.update({
-        spreadsheetId: maintenanceSheetId,
+        spreadsheetId: collectionSheetId,
         range: `${sheetName}!A${flatIndex + 1}:F${flatIndex + 1}`,
         valueInputOption: 'RAW',
         requestBody: {
@@ -778,26 +791,23 @@ export class GoogleSheetsService {
         }
       });
     } catch (error) {
-      console.error('Error updating maintenance status:', error);
+      console.error('Error updating collection status:', error);
       Sentry.captureException(error);
-      throw new Error('Failed to update maintenance status');
+      throw new Error('Failed to update collection status');
     }
   }
 
-  async getMaintenanceCollection(): Promise<MaintenanceCollection[]> {
+  async getCollection(collectionType: CollectionSheet): Promise<MaintenanceCollection[]> {
     try {
-      const date = new Date();
-      const quarter = Math.floor(date.getMonth() / 3) + 1;
-      const year = date.getFullYear();
-      const sheetName = `Q${quarter} ${year}`;
-      const maintenanceSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
+      const sheetName = await this.getOrCreateCollectionSheet(collectionType);
+      const collectionSheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
       
-      if (!maintenanceSheetId) {
+      if (!collectionSheetId) {
         throw new Error('MAINTENANCE_SPREADSHEET_ID is not defined in environment variables');
       }
 
       const response = await this.sheets.spreadsheets.values.get({
-        spreadsheetId: maintenanceSheetId,
+        spreadsheetId: collectionSheetId,
         range: `${sheetName}!A:F`,
       });
 
@@ -808,12 +818,62 @@ export class GoogleSheetsService {
         amount: parseFloat(row[2]),
         status: row[3] as 'Pending' | 'Paid',
         paymentDate: row[4] || undefined,
-        addedBy: row[5] || undefined
+        markedBy: row[5] || undefined,
+        description: row[6] || undefined
       }));
     } catch (error) {
-      console.error('Error getting maintenance collection:', error);
+      console.error('Error getting collection:', error);
       Sentry.captureException(error);
-      throw new Error('Failed to get maintenance collection');
+      throw new Error('Failed to get collection');
+    }
+  }
+
+  async getAllCollections(): Promise<CollectionSheet[]> {
+    try {
+      const spreadsheetId = this.configService.get<string>('MAINTENANCE_SPREADSHEET_ID');
+      if (!spreadsheetId) {
+        throw new Error('MAINTENANCE_SPREADSHEET_ID is not defined');
+      }
+
+      const sheets = await this.sheets.spreadsheets.get({
+        spreadsheetId,
+        fields: 'sheets.properties'
+      });
+
+      const collections: CollectionSheet[] = [];
+      for (const sheet of sheets.data.sheets || []) {
+        const title = sheet.properties?.title || '';
+        // Match patterns like "Maintenance Q1 2024", "Water March 2024", or custom names
+        const maintenanceMatch = title.match(/Maintenance Q([1-4]) (\d{4})/);
+        const waterMatch = title.match(/Water (\w+) (\d{4})/);
+        const otherMatch = title.match(/(.+?) (\w+) (\d{4})/);
+
+        if (maintenanceMatch) {
+          collections.push({
+            type: 'maintenance',
+            month: `Q${maintenanceMatch[1]}`,
+            year: parseInt(maintenanceMatch[2])
+          });
+        } else if (waterMatch) {
+          collections.push({
+            type: 'water',
+            month: waterMatch[1],
+            year: parseInt(waterMatch[2])
+          });
+        } else if (otherMatch) {
+          collections.push({
+            type: 'other',
+            description: otherMatch[1],
+            month: otherMatch[2],
+            year: parseInt(otherMatch[3])
+          });
+        }
+      }
+
+      return collections;
+    } catch (error) {
+      console.error('Error getting all collections:', error);
+      throw new Error('Failed to retrieve collections');
     }
   }
 } 
