@@ -46,14 +46,17 @@ export class GoogleSheetsService {
       const sheet = await this.getOrCreateMonthlySheet();
       console.log('Adding entry to sheet:', { entry, sheet });
       
+      // Format amount with INR symbol
+      const formattedAmount = `₹${entry.amount.toLocaleString('en-IN')}`;
+      
       // Ensure we have exactly 7 columns matching our header structure
       const values = [
         [
           entry.date,                                    // A: Date
-          entry.type === 'expense' ? entry.amount : '',  // B: Expense
-          entry.type === 'income' ? entry.amount : '',   // C: Income
-          entry.category,                                // D: Category
-          entry.description,                             // E: Description
+          entry.type,                                    // B: Type
+          entry.category,                                // C: Category
+          entry.description,                             // D: Description
+          formattedAmount,                               // E: Amount
           entry.receiptUrl || '',                        // F: Receipt URL
           new Date().toISOString(),                      // G: Timestamp
         ],
@@ -122,68 +125,68 @@ export class GoogleSheetsService {
             ],
           },
         });
+      }
 
-        // Set up headers and totals row
-        await this.sheets.spreadsheets.values.update({
-          spreadsheetId: this.spreadsheetId,
-          range: `${sheetName}!A1:G2`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: {
-            values: [
-              [
-                'Date',      // A
-                'Expense',   // B
-                'Income',    // C
-                'Category',  // D
-                'Description', // E
-                'Receipt',   // F
-                'Timestamp', // G
-              ],
-              [
-                'Totals',
-                '=SUM(B3:B)',
-                '=SUM(C3:C)',
-                '',
-                '=B2-C2',
-                '',
-                '',
-              ],
+      // Always set up headers and totals row, regardless of whether sheet existed
+      await this.sheets.spreadsheets.values.update({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheetName}!A1:G2`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [
+            [
+              'Date',      // A
+              'Type',      // B
+              'Category',  // C
+              'Description', // D
+              'Amount',    // E
+              'Receipt',   // F
+              'Timestamp', // G
             ],
-          },
-        });
+            [
+              'Totals',
+              '',
+              '',
+              '',
+              '=SUM(E3:E)',
+              '',
+              '',
+            ],
+          ],
+        },
+      });
 
-        // Format headers and totals row
-        const sheetId = await this.getSheetId(response.data.sheets || [], sheetName);
-        await this.sheets.spreadsheets.batchUpdate({
-          spreadsheetId: this.spreadsheetId,
-          requestBody: {
-            requests: [
-              {
-                repeatCell: {
-                  range: {
-                    sheetId,
-                    startRowIndex: 0,
-                    endRowIndex: 2,
-                  },
-                  cell: {
-                    userEnteredFormat: {
-                      backgroundColor: {
-                        red: 0.8,
-                        green: 0.8,
-                        blue: 0.8,
-                      },
-                      textFormat: {
-                        bold: true,
-                      },
+      // Format headers and totals row
+      const sheetId = await this.getSheetId(response.data.sheets || [], sheetName);
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: this.spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              repeatCell: {
+                range: {
+                  sheetId,
+                  startRowIndex: 0,
+                  endRowIndex: 2,
+                },
+                cell: {
+                  userEnteredFormat: {
+                    backgroundColor: {
+                      red: 0.8,
+                      green: 0.8,
+                      blue: 0.8,
+                    },
+                    textFormat: {
+                      bold: true,
                     },
                   },
-                  fields: 'userEnteredFormat(backgroundColor,textFormat)',
                 },
+                fields: 'userEnteredFormat(backgroundColor,textFormat)',
               },
-            ],
-          },
-        });
-      }
+            },
+          ],
+        },
+      });
 
       return sheetName;
     } catch (error) {
@@ -205,17 +208,15 @@ export class GoogleSheetsService {
       if (values.length <= 2) return; // Only headers and totals row
 
       // Calculate totals
-      let totalExpense = 0;
-      let totalIncome = 0;
+      let totalAmount = 0;
 
       // Start from index 2 to skip headers and totals row
       for (let i = 2; i < values.length; i++) {
         const row = values[i];
-        const expense = parseFloat(row[1]) || 0;
-        const income = parseFloat(row[2]) || 0;
-
-        totalExpense += expense;
-        totalIncome += income;
+        // Extract numeric value from amount string (remove ₹ and commas)
+        const amountStr = row[4]?.replace(/[₹,]/g, '') || '0';
+        const amount = parseFloat(amountStr);
+        totalAmount += amount;
       }
 
       // Update totals row
@@ -227,10 +228,10 @@ export class GoogleSheetsService {
           values: [
             [
               'Totals',
-              totalExpense,
-              totalIncome,
               '',
-              `Balance: ${totalIncome - totalExpense}`,
+              '',
+              '',
+              `₹${totalAmount.toLocaleString('en-IN')}`,
               '',
               '',
             ],
