@@ -190,58 +190,95 @@ export class TelegramService implements OnModuleInit {
         type: 'expense',
         userName: `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
       });
+
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '➕ Add Expense', callback_data: 'add_expense' },
+            { text: '➕ Add Income', callback_data: 'add_income' }
+          ],
+          [
+            { text: '📊 Monthly Report', callback_data: 'monthly_report' },
+            { text: '📈 Quarterly Report', callback_data: 'quarterly_report' }
+          ]
+        ]
+      };
+
       await this.bot.sendMessage(
         chatId,
         'Welcome to the Flat Association Expense Bot! 🏢\n\n' +
-        'Available commands:\n' +
-        '/expense - Add a new expense\n' +
-        '/income - Add a new income\n' +
-        '/report - Get monthly report\n' +
-        '/quarterly - Get quarterly report\n' +
-        '/upload - Upload receipt image'
+        'Please select an option:',
+        { reply_markup: keyboard }
       );
     });
 
-    // Handle expense entry
-    this.bot.onText(/\/expense/, async (msg) => {
-      const chatId = msg.chat.id;
-      if (!msg.from) {
-        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+    // Handle callback queries (button clicks)
+    this.bot.on('callback_query', async (callbackQuery) => {
+      if (!callbackQuery.message) {
+        await this.bot.answerCallbackQuery(callbackQuery.id, {
+          text: 'Error: Invalid message'
+        });
         return;
       }
-      const userState = this.userStates.get(chatId) || { type: 'expense' };
-      this.userStates.set(chatId, { 
-        type: 'expense',
-        userName: userState.userName || `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
-      });
-      await this.bot.sendMessage(
-        chatId,
-        'Please enter the expense details in the following format:\n' +
-        'Amount, Category, Description\n' +
-        'Example: 1000, Maintenance, Monthly cleaning\n\n' +
-        'Or upload a receipt image.'
-      );
-    });
 
-    // Handle income entry
-    this.bot.onText(/\/income/, async (msg) => {
-      const chatId = msg.chat.id;
-      if (!msg.from) {
-        await this.bot.sendMessage(chatId, 'Error: Could not identify user. Please try again.');
+      const chatId = callbackQuery.message.chat.id;
+      const data = callbackQuery.data;
+
+      if (!callbackQuery.from) {
+        await this.bot.answerCallbackQuery(callbackQuery.id, {
+          text: 'Error: Could not identify user'
+        });
         return;
       }
-      const userState = this.userStates.get(chatId) || { type: 'income' };
-      this.userStates.set(chatId, { 
-        type: 'income',
-        userName: userState.userName || `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
-      });
-      await this.bot.sendMessage(
-        chatId,
-        'Please enter the income details in the following format:\n' +
-        'Amount, Category, Description\n' +
-        'Example: 5000, Dues, Monthly maintenance\n\n' +
-        'Or upload a receipt image.'
-      );
+
+      // Store user's name if not already stored
+      const currentState = this.userStates.get(chatId);
+      const userState: UserState = {
+        type: currentState?.type || 'expense',
+        userName: currentState?.userName || `${callbackQuery.from.first_name}${callbackQuery.from.last_name ? ' ' + callbackQuery.from.last_name : ''}`,
+        extractedInfo: currentState?.extractedInfo,
+        pendingQuestions: currentState?.pendingQuestions,
+        receiptUrl: currentState?.receiptUrl
+      };
+
+      switch (data) {
+        case 'add_expense':
+          userState.type = 'expense';
+          this.userStates.set(chatId, userState);
+          await this.bot.sendMessage(
+            chatId,
+            'Please enter the expense details in the following format:\n' +
+            'Amount, Category, Description\n' +
+            'Example: 1000, Maintenance, Monthly cleaning\n\n' +
+            'Or upload a receipt image.'
+          );
+          break;
+
+        case 'add_income':
+          userState.type = 'income';
+          this.userStates.set(chatId, userState);
+          await this.bot.sendMessage(
+            chatId,
+            'Please enter the income details in the following format:\n' +
+            'Amount, Category, Description\n' +
+            'Example: 5000, Dues, Monthly maintenance\n\n' +
+            'Or upload a receipt image.'
+          );
+          break;
+
+        case 'monthly_report':
+          await this.bot.sendMessage(chatId, '📊 Generating monthly report...');
+          // TODO: Implement monthly report
+          break;
+
+        case 'quarterly_report':
+          await this.bot.sendMessage(chatId, '📈 Generating quarterly report...');
+          // TODO: Implement quarterly report
+          break;
+      }
+
+      // Answer the callback query to remove the loading state
+      await this.bot.answerCallbackQuery(callbackQuery.id);
     });
 
     // Handle photo messages
@@ -255,9 +292,18 @@ export class TelegramService implements OnModuleInit {
       // Check if user state exists
       const userState = this.userStates.get(chatId);
       if (!userState) {
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: '➕ Add Expense', callback_data: 'add_expense' },
+              { text: '➕ Add Income', callback_data: 'add_income' }
+            ]
+          ]
+        };
         await this.bot.sendMessage(
           chatId,
-          'Please use /expense or /income command first, then upload the receipt image.'
+          'Please select whether this is an expense or income:',
+          { reply_markup: keyboard }
         );
         return;
       }
@@ -386,8 +432,44 @@ export class TelegramService implements OnModuleInit {
         const text = msg.text.toLowerCase();
         const userState = this.userStates.get(chatId);
 
+        // Handle greetings
+        if (['hi', 'hello', 'hey', 'start'].includes(text)) {
+          const keyboard = {
+            inline_keyboard: [
+              [
+                { text: '➕ Add Expense', callback_data: 'add_expense' },
+                { text: '➕ Add Income', callback_data: 'add_income' }
+              ],
+              [
+                { text: '📊 Monthly Report', callback_data: 'monthly_report' },
+                { text: '📈 Quarterly Report', callback_data: 'quarterly_report' }
+              ]
+            ]
+          };
+
+          await this.bot.sendMessage(
+            chatId,
+            'Welcome to the Flat Association Expense Bot! 🏢\n\n' +
+            'Please select an option:',
+            { reply_markup: keyboard }
+          );
+          return;
+        }
+
         if (!userState) {
-          await this.bot.sendMessage(chatId, 'Please use /expense or /income command first.');
+          const keyboard = {
+            inline_keyboard: [
+              [
+                { text: '➕ Add Expense', callback_data: 'add_expense' },
+                { text: '➕ Add Income', callback_data: 'add_income' }
+              ]
+            ]
+          };
+          await this.bot.sendMessage(
+            chatId,
+            'Please select whether this is an expense or income:',
+            { reply_markup: keyboard }
+          );
           return;
         }
 

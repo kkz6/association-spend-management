@@ -212,7 +212,8 @@ export class GoogleSheetsService {
       if (values.length <= 2) return; // Only headers and totals row
 
       // Calculate totals
-      let totalAmount = 0;
+      let totalExpenses = 0;
+      let totalIncome = 0;
 
       // Start from index 2 to skip headers and totals row
       for (let i = 2; i < values.length; i++) {
@@ -220,8 +221,17 @@ export class GoogleSheetsService {
         // Extract numeric value from amount string (remove ₹ and commas)
         const amountStr = row[4]?.replace(/[₹,]/g, '') || '0';
         const amount = parseFloat(amountStr);
-        totalAmount += amount;
+        
+        // Add to appropriate total based on type
+        if (row[1]?.toLowerCase() === 'expense') {
+          totalExpenses += amount;
+        } else if (row[1]?.toLowerCase() === 'income') {
+          totalIncome += amount;
+        }
       }
+
+      // Calculate net balance
+      const netBalance = totalIncome - totalExpenses;
 
       // Update totals row
       await this.sheets.spreadsheets.values.update({
@@ -234,8 +244,8 @@ export class GoogleSheetsService {
               'Totals',
               '',
               '',
-              '',
-              `₹${totalAmount.toLocaleString('en-IN')}`,
+              `Net Balance: ${netBalance >= 0 ? '+' : ''}₹${netBalance.toLocaleString('en-IN')}`,
+              `Income: ₹${totalIncome.toLocaleString('en-IN')}\nExpenses: ₹${totalExpenses.toLocaleString('en-IN')}`,
               '',
               '',
               '',
