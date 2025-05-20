@@ -129,6 +129,7 @@ export class TelegramService implements OnModuleInit {
         type: userState.type,
         extractedInfo,
         pendingQuestions: questions,
+        receiptUrl: userState.receiptUrl,
       });
       await this.bot.sendMessage(chatId, questions[0]);
     } else {
@@ -248,6 +249,13 @@ export class TelegramService implements OnModuleInit {
         try {
           driveUrl = await this.googleDriveService.uploadImage(imageUrl, fileName);
           console.log('Successfully uploaded to Google Drive:', driveUrl);
+          
+          // Update user state with receipt URL immediately after upload
+          this.userStates.set(chatId, {
+            ...userState,
+            receiptUrl: driveUrl,
+          });
+          console.log('Updated user state with receipt URL:', this.userStates.get(chatId));
         } catch (driveError) {
           console.error('Google Drive upload error:', driveError);
           Sentry.captureException(driveError, {
@@ -297,11 +305,9 @@ export class TelegramService implements OnModuleInit {
           // Set the type from user state
           extractedInfo.type = userState.type;
           
-          // Update user state with receipt URL
-          this.userStates.set(chatId, {
-            ...userState,
-            receiptUrl: driveUrl,
-          });
+          // Get the current user state to ensure we have the receipt URL
+          const currentState = this.userStates.get(chatId);
+          console.log('Current user state before confirmation:', currentState);
           
           if (extractedInfo.confidence > 0.7) {
             await this.confirmAndSaveEntry(chatId, extractedInfo);
@@ -358,6 +364,7 @@ export class TelegramService implements OnModuleInit {
         // Handle confirmation
         if (text === 'yes' && userState.extractedInfo) {
           try {
+            console.log('User confirmed entry. Current user state:', userState);
             const entry = {
               amount: userState.extractedInfo.amount || 0,
               category: userState.extractedInfo.category || '',
@@ -414,6 +421,7 @@ export class TelegramService implements OnModuleInit {
             type: userState.type,
             extractedInfo: updatedInfo,
             pendingQuestions: remainingQuestions,
+            receiptUrl: userState.receiptUrl,
           });
 
           if (remainingQuestions.length > 0) {
