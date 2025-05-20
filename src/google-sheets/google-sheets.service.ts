@@ -14,6 +14,19 @@ interface Entry {
   addedBy?: string;
 }
 
+interface FlatInfo {
+  flatNumber: string;
+  floorNumber: string;
+  ownerName: string;
+  tenantName?: string;
+  maintenanceAmount: number;
+  parkingCharges?: number;
+  phoneNumber: string;
+  email?: string;
+  isOccupied: boolean;
+  lastUpdated: string;
+}
+
 @Injectable()
 export class GoogleSheetsService {
   private auth: JWT;
@@ -376,6 +389,183 @@ export class GoogleSheetsService {
       console.error('Error getting sheet data:', error);
       Sentry.captureException(error);
       throw new Error('Failed to get sheet data');
+    }
+  }
+
+  async initializeFlatInfoSheet(): Promise<void> {
+    try {
+      // Check if sheet exists
+      const response = await this.sheets.spreadsheets.get({
+        spreadsheetId: this.spreadsheetId,
+      });
+
+      const sheetExists = response.data.sheets?.some(
+        sheet => sheet.properties?.title === 'Flat Information'
+      );
+
+      if (!sheetExists) {
+        // Create new sheet
+        await this.sheets.spreadsheets.batchUpdate({
+          spreadsheetId: this.spreadsheetId,
+          requestBody: {
+            requests: [
+              {
+                addSheet: {
+                  properties: {
+                    title: 'Flat Information',
+                    gridProperties: {
+                      rowCount: 1000,
+                      columnCount: 9
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        });
+
+        // Add headers
+        await this.sheets.spreadsheets.values.update({
+          spreadsheetId: this.spreadsheetId,
+          range: "'Flat Information'!A1:I1",
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [[
+              'Flat Number',
+              'Floor Number',
+              'Owner Name',
+              'Tenant Name',
+              'Maintenance Amount',
+              'Phone Number',
+              'Email',
+              'Is Occupied',
+              'Last Updated'
+            ]]
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error initializing flat info sheet:', error);
+      throw new Error('Failed to initialize flat information sheet');
+    }
+  }
+
+  async updateFlatInfo(flatInfo: FlatInfo): Promise<void> {
+    try {
+      // First, ensure the sheet exists
+      await this.initializeFlatInfoSheet();
+
+      // Get all existing flats
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: "'Flat Information'!A:I", // Updated range to match our columns
+      });
+
+      const values = response.data.values || [];
+      const headers = values[0] || [];
+      const existingFlats = values.slice(1);
+
+      // Find if flat already exists
+      const flatIndex = existingFlats.findIndex(flat => flat[0] === flatInfo.flatNumber);
+
+      const rowData = [
+        flatInfo.flatNumber,
+        flatInfo.floorNumber,
+        flatInfo.ownerName,
+        flatInfo.tenantName || '',
+        flatInfo.maintenanceAmount.toString(),
+        flatInfo.phoneNumber,
+        flatInfo.email || '',
+        flatInfo.isOccupied ? 'Yes' : 'No',
+        flatInfo.lastUpdated
+      ];
+
+      if (flatIndex === -1) {
+        // Add new flat
+        await this.sheets.spreadsheets.values.append({
+          spreadsheetId: this.spreadsheetId,
+          range: "'Flat Information'!A:I", // Updated range to match our columns
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [rowData]
+          }
+        });
+      } else {
+        // Update existing flat
+        const range = `'Flat Information'!A${flatIndex + 2}:I${flatIndex + 2}`; // +2 because of 0-based index and header row
+        await this.sheets.spreadsheets.values.update({
+          spreadsheetId: this.spreadsheetId,
+          range,
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [rowData]
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error updating flat info:', error);
+      throw new Error('Failed to update flat information');
+    }
+  }
+
+  async getFlatInfo(flatNumber: string): Promise<FlatInfo | null> {
+    try {
+      const sheetName = 'Flat Information';
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheetName}!A:J`,
+      });
+
+      const data = response.data.values || [];
+      const flatRow = data.find(row => row[0] === flatNumber);
+
+      if (!flatRow) return null;
+
+      return {
+        flatNumber: flatRow[0],
+        floorNumber: flatRow[1],
+        ownerName: flatRow[2],
+        tenantName: flatRow[3] || undefined,
+        maintenanceAmount: parseFloat(flatRow[4]),
+        parkingCharges: flatRow[5] ? parseFloat(flatRow[5]) : undefined,
+        phoneNumber: flatRow[6],
+        email: flatRow[7] || undefined,
+        isOccupied: flatRow[8] === 'Yes',
+        lastUpdated: flatRow[9]
+      };
+    } catch (error) {
+      console.error('Error getting flat info:', error);
+      Sentry.captureException(error);
+      throw new Error('Failed to get flat information');
+    }
+  }
+
+  async getAllFlats(): Promise<FlatInfo[]> {
+    try {
+      const sheetName = 'Flat Information';
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheetName}!A:J`,
+      });
+
+      const data = response.data.values || [];
+      // Skip header row
+      return data.slice(1).map(row => ({
+        flatNumber: row[0],
+        floorNumber: row[1],
+        ownerName: row[2],
+        tenantName: row[3] || undefined,
+        maintenanceAmount: parseFloat(row[4]),
+        parkingCharges: row[5] ? parseFloat(row[5]) : undefined,
+        phoneNumber: row[6],
+        email: row[7] || undefined,
+        isOccupied: row[8] === 'Yes',
+        lastUpdated: row[9]
+      }));
+    } catch (error) {
+      console.error('Error getting all flats:', error);
+      Sentry.captureException(error);
+      throw new Error('Failed to get flat information');
     }
   }
 } 
